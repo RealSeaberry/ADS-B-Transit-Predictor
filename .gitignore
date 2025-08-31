@@ -166,4 +166,14 @@ __pycache__/
 .vscode/
 *.DS_Store
 # Ignore large map data files
-*.tif
+
+
+# ... (Python, venv, build, dist 等)
+
+# Ignore large data assets
+*.bsp
+/data/map_vectors/
+
+# Ignore third-party binaries
+/dump1090/
+
