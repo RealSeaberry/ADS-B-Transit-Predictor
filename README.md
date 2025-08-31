@@ -36,10 +36,10 @@ This application was built using a combination of powerful Python libraries and 
 
 ## Screenshots
 
-![Main application interface](assets/screenshot_1.png)
+![Main application interface](assets/Screenshot_1.png)
 *<p align="center">The main interface showing live aircraft, transit corridors, and predicted events.</p>*
 
-![Configuration menu](assets/screenshot_2.png)
+![Configuration menu](assets/Screenshot_2.png)
 *<p align="center">The configuration menu, allowing for customization of user location, prediction parameters, and map layers.</p>*
 
 ![Example of a close encounter](assets/eg.jpg)
