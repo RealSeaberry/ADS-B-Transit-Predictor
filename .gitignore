@@ -177,3 +177,5 @@ __pycache__/
 # Ignore third-party binaries
 /dump1090/
 
+# Ignore all data assets, they are provided in the release package
+/data/
