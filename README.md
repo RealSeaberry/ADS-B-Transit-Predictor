@@ -43,7 +43,7 @@ This application was built using a combination of powerful Python libraries and 
 *<p align="center">The configuration menu, allowing for customization of user location, prediction parameters, and map layers.</p>*
 
 ![Example of a close encounter](assets/eg.jpg)
-*<p align="center">A screenshot displaying two four-engine jets in close proximity.</p>*
+*<p align="center">A screenshot displaying a B747-8F and an IL-76 in close proximity.</p>*
 
 ---
 
