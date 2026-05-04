@@ -18,7 +18,7 @@ The latest Linux package is intended to be downloaded as:
 
 ```bash
 mkdir -p ~/adsb-transit && cd ~/adsb-transit
-wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web.tar.gz"
+wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web-v1.3.0-20260504.tar.tar.gz"
 tar -xzf ADS-B-Transit-Predictor-linux-web.tar.gz
 cd ADS-B-Transit-Predictor-*
 ./scripts/install_linux.sh
@@ -83,23 +83,6 @@ The earlier Windows release uses the original desktop interface. It remains avai
 * **Linux Web UI:** Python HTTP server, HTML Canvas, HTTPS, local vector map rendering
 * **ADS-B decoder:** dump1090 / dump1090-mutability SBS output
 
-## Release And Version Policy
-
-This repository keeps one shared Git history for ADS-B Transit Predictor. Windows desktop and Linux web-server packages are release assets built from tagged states of that history; they are not separate repositories.
-
-Older Windows releases remain preserved by their existing tags and GitHub Release pages. Publishing a new Linux web-server release does not delete or overwrite those assets. Users who need the Windows `.exe` should download the older Windows release asset from the Releases page.
-
-Release packages may contain platform-specific README content:
-
-* The repository README is a version-selection entry point.
-* The Linux `.tar.gz` package uses a Linux-focused README with `usbipd`, Tailscale, HTTPS, GPS, and `adsb-web` setup.
-* A future Windows package can include a Windows-focused README for the desktop `.exe` workflow.
-
-Suggested release assets:
-
-* `ADS-B-Transit-Predictor-linux-web.tar.gz`
-* `ADS-B-Transit-Predictor-vX.Y.Z-linux-web.tar.gz`
-* `ADS-B-Transit-Predictor-vX.Y.Z-windows.zip`
 
 ## Acknowledgements
 
