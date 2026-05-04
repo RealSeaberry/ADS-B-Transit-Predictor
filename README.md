@@ -38,13 +38,13 @@ For full Linux/WSL setup, including `usbipd`, Tailscale, HTTPS self-signed certi
 
 ## Linux Web Server Preview
 
-### S1: Mobile/Tailnet Web UI
+### Mobile/Tailnet Web UI
 ![S1 Web UI](assets/Screenshot_5.jpg)
 
-### S2: Settings And Receiver Configuration
+### Live Aviation Map
 ![S2 Settings](assets/Screenshot_6.jpg)
 
-### S3: Live Aviation Map
+### Settings And Receiver Configuration
 ![S3 Live Map](assets/Screenshot_7.jpg)
 
 ### Linux/WSL Network Architecture
