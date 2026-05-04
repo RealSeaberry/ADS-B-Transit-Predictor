@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ADS-B Transit Web</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="map-pane">
+      <canvas id="mapCanvas" width="1200" height="900" aria-label="ADS-B traffic map"></canvas>
+      <div class="map-toolbar">
+        <button id="zoomIn" title="Zoom in">+</button>
+        <button id="zoomOut" title="Zoom out">-</button>
+        <button id="centerUser" title="Center on user">Center</button>
+        <button id="toggleTransits" title="Transit strip mode">Transit</button>
+        <button id="openSettings" title="Settings">Settings</button>
+      </div>
+      <div id="mapAircraftInfo" class="map-aircraft-info" hidden></div>
+      <div class="scale-chip" id="scaleChip">-- km</div>
+    </section>
+
+    <aside class="side-pane">
+      <header class="brand">
+        <div>
+          <h1>ADS-B Transit</h1>
+          <p id="clockLine">--</p>
+        </div>
+        <button type="button" id="hidePanel" title="Hide panel">Hide</button>
+        <span id="connBadge" class="badge">Offline</span>
+      </header>
+
+      <section class="metrics">
+        <div><span>Active</span><strong id="activeCount">0</strong></div>
+        <div><span>Displayed</span><strong id="displayedCount">0</strong></div>
+        <div><span>Events</span><strong id="eventCount">0</strong></div>
+      </section>
+
+      <section class="panel">
+        <h2>Status</h2>
+        <dl id="statusList"></dl>
+      </section>
+
+      <section class="panel selected">
+        <h2>Selected Aircraft</h2>
+        <div id="selectedAircraft" class="empty">Click an aircraft on the map or table.</div>
+      </section>
+
+      <section class="panel events">
+        <h2>Predicted Events</h2>
+        <div id="eventsList" class="list empty">None</div>
+      </section>
+
+      <section class="panel traffic">
+        <h2>Traffic</h2>
+        <div id="trafficList" class="traffic-list"></div>
+      </section>
+    </aside>
+  </main>
+  <button type="button" id="showPanel" class="show-panel" title="Show panel">Panel</button>
+
+  <dialog id="settingsDialog" class="settings-dialog">
+    <form id="settingsForm" method="dialog">
+      <header class="settings-head">
+        <div>
+          <h2>Settings</h2>
+          <p>Saved to config.json and applied to the running Web UI.</p>
+        </div>
+        <button type="button" id="closeSettings" title="Close">X</button>
+      </header>
+      <div id="settingsBody" class="settings-body"></div>
+      <footer class="settings-actions">
+        <button type="button" id="gpsButton">Use GPS</button>
+        <button type="button" id="windowsGpsButton">Windows Location</button>
+        <span id="settingsMessage"></span>
+        <button type="button" id="saveSettings">Save</button>
+      </footer>
+    </form>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>

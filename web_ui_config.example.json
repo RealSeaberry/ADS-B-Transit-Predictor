@@ -1,0 +1,30 @@
+{
+    "active_glideslopes": [],
+    "aircraft_label_fields": [
+        "callsign",
+        "altitude",
+        "speed",
+        "vs"
+    ],
+    "aircraft_label_lines": [
+        [
+            "callsign"
+        ],
+        [
+            "altitude",
+            "speed",
+            "vs"
+        ]
+    ],
+    "aircraft_label_color": "aircraft",
+    "ils_length_nm": "10",
+    "ils_style": "atc",
+    "trajectory_display_mode": "altitude",
+    "trajectory_minutes": 2.0,
+    "unit_altitude": "ft",
+    "unit_distance": "km",
+    "unit_speed": "kt",
+    "show_event_range_ring": true,
+    "show_geo_vectors": true,
+    "visual_style": "current"
+}

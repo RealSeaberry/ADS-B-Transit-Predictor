@@ -179,3 +179,7 @@ __pycache__/
 
 # Ignore all data assets, they are provided in the release package
 /data/
+
+# Local Web UI settings, may contain private display or location preferences
+/web_ui_config.json
+/.web_certs/

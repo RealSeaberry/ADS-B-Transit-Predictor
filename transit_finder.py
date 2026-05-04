@@ -81,7 +81,7 @@ ALL_AIRPORT_TYPES = ['small_airport', 'medium_airport', 'large_airport', 'helipo
 ALL_NAVAID_TYPES = ['VOR', 'VORDME', 'DME', 'NDB', 'TACAN', 'VORTAC', 'FIX', 'WAYPOINT','VOR-DME']
 DISPLAY_NAVAID_TYPES = ['VOR', 'DME', 'NDB', 'TACAN', 'VORTAC', 'FIX', 'WAYPOINT', 'VOR-DME']
 CONSOLIDATED_NAVAID_MAP = {'VOR-DME': ['VORDME', 'VOR-DME']}
-HISTORY_POINT_SIZE = 2; HISTORY_ALPHA = 100; MAX_HISTORY_POINTS_PER_AC = 300
+HISTORY_POINT_SIZE = 2; HISTORY_ALPHA = 100; MAX_HISTORY_POINTS_PER_AC = 1200
 GLIDESLOPE_LENGTH_LARGE_KM = 18.52; GLIDESLOPE_LENGTH_MEDIUM_KM = 12.964; GLIDESLOPE_LENGTH_SMALL_KM = 9.26
 GLIDESLOPE_TICK_INTERVAL_KM = 1.8519; GLIDESLOPE_TICK_HALF_LENGTH_PX = 4; GLIDESLOPE_COLOR = (180, 180, 255)
 RUNWAY_CLICK_SENSITIVITY_PX = 10; EARTH_RADIUS_KM = 6371.0088
@@ -314,7 +314,10 @@ def calculate_panel_layout(screen_width, screen_height):
 
 
 dump1090_process = None
-try:
+def start_dump1090_process():
+    global dump1090_process
+    if dump1090_process and dump1090_process.poll() is None:
+        return dump1090_process
     dump1090_executable_relative = os.path.join("dump1090", "dump1090.exe")
     dump1090_executable_absolute = os.path.join(app_dir, dump1090_executable_relative)
     if not os.path.isfile(dump1090_executable_absolute): raise FileNotFoundError(f"dump1090 not found: {dump1090_executable_absolute}")
@@ -325,8 +328,7 @@ try:
     dump1090_process = subprocess.Popen(dump1090_cmd, creationflags=dump1090_creation_flags)
     print("dump1090 process started (PID:", dump1090_process.pid, ")")
     time.sleep(2)
-except FileNotFoundError as fnf_error: print(f"Error: {fnf_error}\nContinuing without dump1090 auto-start.")
-except Exception as e: print(f"Error starting dump1090: {e}"); traceback.print_exc(); print("Continuing without dump1090 auto-start.")
+    return dump1090_process
 
 eph = None; ts = None; observer_topos = None
 A = 6378.137; F = 1 / 298.257223563; B = A * (1 - F)
@@ -902,10 +904,10 @@ def predict_celestial_conflicts():
         """
         Find the exact timestamp of minimum angular separation near t_center_sec.
         """
-        # Search window: interval spanning one step before and after coarse detection
-        window = PREDICTION_STEP * 1.5
-        a = max(0, t_center_sec - window)
-        b = t_center_sec + window
+        # Search window: wide enough that a fast aircraft cannot slip between coarse samples.
+        window = max(PREDICTION_STEP * 2.5, 2.0)
+        a = max(0.0, t_center_sec - window)
+        b = min(float(PREDICTION_HORIZON), t_center_sec + window)
         
         # Golden ratio constants
         phi = (1 + sqrt(5)) / 2
@@ -935,14 +937,31 @@ def predict_celestial_conflicts():
             except:
                 return 999.0
 
+        # First bracket the local minimum with a dense local scan, then refine that bracket.
+        sample_count = 13
+        sample_step = (b - a) / (sample_count - 1) if sample_count > 1 else 0.0
+        samples = []
+        for idx in range(sample_count):
+            t_sample = a + sample_step * idx
+            samples.append((t_sample, get_sep_at(t_sample)))
+        best_idx = min(range(len(samples)), key=lambda idx: samples[idx][1])
+        left_idx = max(0, best_idx - 1)
+        right_idx = min(len(samples) - 1, best_idx + 1)
+        a = samples[left_idx][0]
+        b = samples[right_idx][0]
+        if a == b:
+            return samples[best_idx]
+
         # Iterative solver execution
         c = a + resphi * (b - a)
         d = b - resphi * (b - a)
         fc = get_sep_at(c)
         fd = get_sep_at(d)
         
-        # 15 iterations are sufficient to reach millisecond-level precision
-        for _ in range(15):
+        # 28 iterations keep the mathematical solver far below ADS-B telemetry error.
+        for _ in range(28):
+            if abs(b - a) < 0.001:
+                break
             if fc < fd:
                 b = d
                 d = c
@@ -957,8 +976,9 @@ def predict_celestial_conflicts():
                 fd = get_sep_at(d)
         
         t_min = (a + b) / 2
-        min_sep = get_sep_at(t_min)
-        return t_min, min_sep
+        candidates = [(t_min, get_sep_at(t_min)), samples[best_idx]]
+        candidates.extend((t_edge, get_sep_at(t_edge)) for t_edge in (a, b))
+        return min(candidates, key=lambda item: item[1])
 
     while running:
         active_ac = get_active_aircraft()
@@ -1009,12 +1029,14 @@ def predict_celestial_conflicts():
                         # 粗略角度
                         ang_s_coarse = sun_apparent.separation_from(ac_apparent).degrees
 
-                        if ang_s_coarse <= CONFLICT_ANGLE_DEG:
+                        sun_capture_threshold = SUN_ANGULAR_DIAMETER_DEG / 2.0
+                        sun_refine_threshold = max(CONFLICT_ANGLE_DEG, sun_capture_threshold + 0.75)
+                        if ang_s_coarse <= sun_refine_threshold:
                             # [Refinement] Initiate golden section search for sub-second precision
                             precise_t, precise_ang = minimize_separation(ac, sun_obj, dt, now)
                             
                             # Only record if refined angle meets threshold and is not an anomaly/outlier
-                            if precise_ang <= CONFLICT_ANGLE_DEG and precise_ang < 20.0:
+                            if precise_ang <= sun_capture_threshold and precise_ang < 20.0:
                                 eid = (icao, 'AC-Sun')
                                 pt_final = now + timedelta(seconds=precise_t)
                                 
@@ -1087,10 +1109,12 @@ def predict_celestial_conflicts():
                     else:
                         ang_m_coarse = moon_apparent.separation_from(ac_apparent).degrees
 
-                        if ang_m_coarse <= CONFLICT_ANGLE_DEG:
+                        moon_capture_threshold = MOON_ANGULAR_DIAMETER_DEG / 2.0
+                        moon_refine_threshold = max(CONFLICT_ANGLE_DEG, moon_capture_threshold + 0.75)
+                        if ang_m_coarse <= moon_refine_threshold:
                             precise_t, precise_ang = minimize_separation(ac, moon_obj, dt, now)
 
-                            if precise_ang <= CONFLICT_ANGLE_DEG and precise_ang < 20.0:
+                            if precise_ang <= moon_capture_threshold and precise_ang < 20.0:
                                 eid = (icao, 'AC-Moon')
                                 pt_final = now + timedelta(seconds=precise_t)
                                 t_final = ts.utc(pt_final)
@@ -2577,6 +2601,13 @@ def visualization_loop(screen, current_screen_width, current_screen_height):
 if __name__ == "__main__":
     running = True
     pygame.init() 
+
+    try:
+        start_dump1090_process()
+    except FileNotFoundError as fnf_error:
+        print(f"Error: {fnf_error}\nContinuing without dump1090 auto-start.")
+    except Exception as e:
+        print(f"Error starting dump1090: {e}"); traceback.print_exc(); print("Continuing without dump1090 auto-start.")
 
     # --- Load fonts for the loading screen ---
     try: loading_font_main = pygame.font.SysFont("Consolas", 28, bold=True)
