@@ -18,7 +18,7 @@ The latest Linux package is intended to be downloaded as:
 
 ```bash
 mkdir -p ~/adsb-transit && cd ~/adsb-transit
-wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web-v1.3.0-20260504.tar.tar.gz"
+wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web-v1.3.0-20260504.tar.gz"
 tar -xzf ADS-B-Transit-Predictor-linux-web.tar.gz
 cd ADS-B-Transit-Predictor-*
 ./scripts/install_linux.sh
