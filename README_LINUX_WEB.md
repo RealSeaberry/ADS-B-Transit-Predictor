@@ -32,9 +32,9 @@ The older Windows desktop release remains available from previous GitHub Release
 
 ```bash
 mkdir -p ~/adsb-transit && cd ~/adsb-transit
-wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web.tar.gz"
+wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web-v1.3.0-20260504.tar.gz"
 tar -xzf ADS-B-Transit-Predictor-linux-web.tar.gz
-cd ADS-B-Transit-Predictor-*
+cd ADS-B-Transit-Predictor-linux-web-v1.3.0-20260504
 ./scripts/install_linux.sh
 ```
 
