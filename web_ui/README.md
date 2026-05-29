@@ -10,7 +10,7 @@ Download a Linux/WSL release package and run the installer once:
 mkdir -p ~/adsb-transit && cd ~/adsb-transit
 wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web.tar.gz"
 tar -xzf ADS-B-Transit-Predictor-linux-web.tar.gz
-cd ADS-B-Transit-Predictor-*
+cd ADS-B-Transit-Predictor-*/
 ./scripts/install_linux.sh
 ```
 

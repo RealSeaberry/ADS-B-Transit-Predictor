@@ -165,21 +165,10 @@ __pycache__/
 .idea/
 .vscode/
 *.DS_Store
-# Ignore large map data files
-
-
-# ... (Python, venv, build, dist 等)
-
-# Ignore large data assets
-*.bsp
-/data/map_vectors/
-
-# Ignore third-party binaries
-/dump1090/
-
-# Ignore all data assets, they are provided in the release package
+# External data — downloaded at install time, not tracked in source
 /data/
 
-# Local Web UI settings, may contain private display or location preferences
+# Local runtime files
+/dump1090/
 /web_ui_config.json
 /.web_certs/

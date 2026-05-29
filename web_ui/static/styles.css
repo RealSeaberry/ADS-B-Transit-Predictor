@@ -168,12 +168,52 @@ body.panel-hidden .side-pane {
   white-space: nowrap;
 }
 
+.view-overlay {
+  position: fixed;
+  inset: max(12px, var(--safe-top)) max(12px, var(--safe-right)) max(12px, var(--safe-bottom)) max(12px, var(--safe-left));
+  z-index: 45;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow: 0 22px 80px rgba(0, 0, 0, 0.58);
+}
+
+.view-overlay[hidden] {
+  display: none;
+}
+
+.view-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(8, 11, 15, 0.90);
+}
+
+.view-head span {
+  flex: 1 1 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#viewCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
 .side-pane {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 12px;
   padding: 16px;
+  padding-bottom: max(32px, calc(var(--safe-bottom) + 24px));
   overflow-y: auto;
   overflow-x: hidden;
   border-left: 1px solid var(--line);
@@ -352,8 +392,19 @@ h2 {
   font-size: 12px;
 }
 
+.event-row small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
 .event-row:first-child {
   border-top: 0;
+}
+
+.event-row.event-summary {
+  color: var(--muted);
 }
 
 .event-row b {
@@ -428,6 +479,51 @@ body[data-style="atc"] {
   --text: #b8ffd9;
   --muted: #76c99b;
   --line: rgba(65, 255, 120, 0.24);
+}
+
+body[data-style="cwp_classic"] {
+  --bg: #010302;
+  --panel: #061009;
+  --panel-2: #09170d;
+  --text: #c8f6d6;
+  --muted: #87cfa0;
+  --line: rgba(135, 210, 160, 0.24);
+}
+
+body[data-style="cwp_approach"] {
+  --bg: #010203;
+  --panel: #071013;
+  --panel-2: #0a171a;
+  --text: #d7f8ff;
+  --muted: #96d7e1;
+  --line: rgba(110, 230, 210, 0.24);
+}
+
+body[data-style="cwp_enroute"] {
+  --bg: #03050b;
+  --panel: #080c18;
+  --panel-2: #0d1222;
+  --text: #d8e4ff;
+  --muted: #9aa8d2;
+  --line: rgba(150, 160, 190, 0.28);
+}
+
+body[data-style="cwp_contrast"] {
+  --bg: #000000;
+  --panel: #050505;
+  --panel-2: #101010;
+  --text: #ffffff;
+  --muted: #d0d0d0;
+  --line: rgba(255, 255, 255, 0.34);
+}
+
+body[data-style="cwp_minimal"] {
+  --bg: #000000;
+  --panel: #050705;
+  --panel-2: #090d09;
+  --text: #d6f5df;
+  --muted: #92b59b;
+  --line: rgba(150, 190, 160, 0.18);
 }
 
 .runway-popover {
@@ -510,6 +606,7 @@ body[data-style="atc"] {
   border-bottom: 0;
   flex-wrap: wrap;
   flex: 0 0 auto;
+  position: relative;
 }
 
 .settings-body {
@@ -532,6 +629,105 @@ body[data-style="atc"] {
 
 .settings-group.full {
   grid-column: 1 / -1;
+}
+
+.settings-help {
+  grid-column: 1 / -1;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(8, 11, 15, 0.34);
+}
+
+.settings-about {
+  grid-column: 1 / -1;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(8, 11, 15, 0.34);
+}
+
+.settings-help summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.settings-about summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.settings-help div {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.settings-help p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.about-card {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.about-card img {
+  width: 58px;
+  height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  object-fit: contain;
+}
+
+.about-card strong,
+.about-card span,
+.about-card a {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.about-card strong {
+  font-size: 15px;
+}
+
+.about-card span,
+.about-deps li {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.about-card a {
+  margin-top: 3px;
+  color: var(--cyan);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.about-deps {
+  margin-top: 12px;
+}
+
+.about-deps h3 {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.about-deps ul {
+  display: grid;
+  gap: 4px;
+  padding-left: 18px;
+  margin: 0;
 }
 
 .settings-grid {
@@ -757,6 +953,12 @@ body[data-style="atc"] {
     right: max(8px, var(--safe-right));
     bottom: max(8px, var(--safe-bottom));
     width: min(260px, calc(100% - 16px));
+  }
+
+  .show-panel {
+    top: auto;
+    right: max(10px, var(--safe-right));
+    bottom: max(10px, var(--safe-bottom));
   }
 
   .side-pane {

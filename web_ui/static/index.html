@@ -15,6 +15,7 @@
         <button id="zoomOut" title="Zoom out">-</button>
         <button id="centerUser" title="Center on user">Center</button>
         <button id="toggleTransits" title="Transit strip mode">Transit</button>
+        <button id="viewModeButton" title="Switch 2D / 3D view">2D</button>
         <button id="openSettings" title="Settings">Settings</button>
       </div>
       <div id="mapAircraftInfo" class="map-aircraft-info" hidden></div>
@@ -34,7 +35,7 @@
       <section class="metrics">
         <div><span>Active</span><strong id="activeCount">0</strong></div>
         <div><span>Displayed</span><strong id="displayedCount">0</strong></div>
-        <div><span>Events</span><strong id="eventCount">0</strong></div>
+        <div><span>Active</span><strong id="eventCount">0</strong></div>
       </section>
 
       <section class="panel">
@@ -78,6 +79,14 @@
       </footer>
     </form>
   </dialog>
+  <div id="viewOverlay" class="view-overlay" hidden>
+    <div class="view-head">
+      <strong id="viewTitle">3D View</strong>
+      <span id="viewHint">Drag to rotate, wheel to zoom</span>
+      <button type="button" id="closeViewOverlay">Close</button>
+    </div>
+    <canvas id="viewCanvas" width="1200" height="760"></canvas>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

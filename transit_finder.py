@@ -56,14 +56,16 @@ DEFAULT_HOST = "127.0.0.1"; DEFAULT_PORT = 30003
 DEFAULT_LAT_DEG = 51.471974; DEFAULT_LON_DEG =  -0.453119; DEFAULT_ALT_M = 28 # User's specific altitude in meter
 DEFAULT_AIRCRAFT_TIMEOUT_SEC = 60; DEFAULT_PREDICTION_INTERVAL_SEC = 1.0
 DEFAULT_PREDICTION_HORIZON_SEC = 120; DEFAULT_PREDICTION_STEP_SEC = 0.5
+DEFAULT_PREDICTION_AVERAGE_SEC = 8.0
 DEFAULT_CONFLICT_ANGLE_DEG = 2.0
+DEFAULT_EVENT_MIN_ELEVATION_DEG = 2.0
 DEFAULT_DUMP1090_DEVICE_INDEX = 0
 DEFAULT_DUMP1090_GAIN = "-10"
 DEFAULT_AIRCRAFT_HISTORY_MINUTES = 5.0
 DEFAULT_SHOW_AIRCRAFT_HISTORY = True
 DEFAULT_SHOW_EVENT_LOCATIONS = True
 DEFAULT_SHOW_AIRPORT_TYPES = [ 'medium_airport', 'large_airport']
-DEFAULT_SHOW_NAVAID_TYPES = ['VOR', 'VORDME', 'DME', 'NDB', 'TACAN', 'VORTAC', 'FIX', 'WAYPOINT','VOR-DME']
+DEFAULT_SHOW_NAVAID_TYPES = ['VOR', 'VORDME', 'DME', 'NDB', 'TACAN', 'VORTAC', 'FIX', 'WAYPOINT']
 DEFAULT_SHOW_GLIDESLOPE = False
 DEFAULT_SHOW_RANGE_RINGS = False
 DEFAULT_RANGE_RING_SPACING_NM_STR = "10"
@@ -78,19 +80,38 @@ RUNWAY_MIN_ZOOM_KM = 120
 NAVAID_LABEL_MIN_ZOOM_KM = 500
 RUNWAY_LABEL_MIN_ZOOM_KM = 120
 ALL_AIRPORT_TYPES = ['small_airport', 'medium_airport', 'large_airport', 'heliport', 'seaplane_base']
-ALL_NAVAID_TYPES = ['VOR', 'VORDME', 'DME', 'NDB', 'TACAN', 'VORTAC', 'FIX', 'WAYPOINT','VOR-DME']
-DISPLAY_NAVAID_TYPES = ['VOR', 'DME', 'NDB', 'TACAN', 'VORTAC', 'FIX', 'WAYPOINT', 'VOR-DME']
-CONSOLIDATED_NAVAID_MAP = {'VOR-DME': ['VORDME', 'VOR-DME']}
-HISTORY_POINT_SIZE = 2; HISTORY_ALPHA = 100; MAX_HISTORY_POINTS_PER_AC = 1200
+ALL_NAVAID_TYPES = ['VOR', 'VORDME', 'DME', 'NDB', 'TACAN', 'VORTAC', 'FIX', 'WAYPOINT']
+DISPLAY_NAVAID_TYPES = ALL_NAVAID_TYPES
+CONSOLIDATED_NAVAID_MAP = {}
+HISTORY_POINT_SIZE = 2; HISTORY_ALPHA = 100; MAX_HISTORY_POINTS_PER_AC = 20000
 GLIDESLOPE_LENGTH_LARGE_KM = 18.52; GLIDESLOPE_LENGTH_MEDIUM_KM = 12.964; GLIDESLOPE_LENGTH_SMALL_KM = 9.26
 GLIDESLOPE_TICK_INTERVAL_KM = 1.8519; GLIDESLOPE_TICK_HALF_LENGTH_PX = 4; GLIDESLOPE_COLOR = (180, 180, 255)
 RUNWAY_CLICK_SENSITIVITY_PX = 10; EARTH_RADIUS_KM = 6371.0088
 RANGE_RING_COLOR = (0, 80, 0); NM_TO_KM = 1.852; RANGE_RING_OPTIONS_NM = ["1", "2.5", "5", "10", "25", "50"]
 SUN_ANGULAR_DIAMETER_DEG = 0.53; MOON_ANGULAR_DIAMETER_DEG = 0.50
+SUN_RADIUS_KM = 695700.0; MOON_RADIUS_KM = 1737.4
 DATA_RETENTION_SECONDS = 1800 
+MAX_TELEMETRY_HISTORY_POINTS_PER_AC = 240
+LIKELY_LANDED_MAX_SPEED_KTS = 28.0
+LIKELY_LANDED_RECENT_SPEED_KTS = 40.0
+LIKELY_LANDED_MAX_VS_FPM = 160.0
+LIKELY_LANDED_ALT_FT = 2500.0
+LIKELY_LANDED_AIRPORT_KM = 5.0
+LIKELY_LANDED_RUNWAY_KM = 1.6
+LANDED_RUNWAY_THRESHOLD_KM = 0.10
+LANDED_ELEVATION_MARGIN_FT = 150.0
+LANDED_RELEASE_MIN_SPEED_KTS = 70.0
+LANDED_RELEASE_SPEED_DELTA_KTS = 15.0
+LOWEST_PLAUSIBLE_AIRCRAFT_ALT_FT = -1650.0
+ILS_LOC_MAX_DISTANCE_KM = 18.6
+ILS_LOC_MAX_HEADING_DELTA_DEG = 18.0
+ILS_LOC_MIN_HISTORY_SEC = 8.0
+LOC_RELEASE_POSITIVE_VS_UPDATES = 3
+LISTENER_IDLE_RECONNECT_SEC = 90.0
 # --- Global variables ---
 active_glideslopes = {}; dialog_runway_end_result_storage = [None]; dialog_runway_end_thread = None
 aircraft_dict = {}; event_dict = {}; history_event_count = 0
+EVENT_PREDICTION_PAUSED = False
 DUMP1090_CONNECTED = False; start_time = datetime.now(timezone.utc)
 INITIAL_MAP_RANGE_KM = 30 * 2.0 # Default derived from conflict radius
 MIN_MAP_RANGE_KM = 1.0; MAX_MAP_RANGE_KM = 1000.0; ZOOM_FACTOR = 1.25
@@ -98,6 +119,17 @@ lock = threading.Lock(); dialog_result_storage = [None]; dialog_thread = None
 running = True
 
 selected_aircraft_for_transit_icao = None; last_clicked_transit_coord = None; last_clicked_transit_time = 0
+
+def aircraft_history_maxlen():
+    try:
+        seconds = AIRCRAFT_HISTORY_MINUTES * 60
+        points = max(
+            int(seconds / max(PREDICTION_INTERVAL, 0.1)) + 5,
+            int(seconds / 0.25) + 5,
+        )
+    except Exception:
+        points = 50
+    return min(max(points, 50), MAX_HISTORY_POINTS_PER_AC)
 
 def get_application_path():
     if getattr(sys, 'frozen', False): application_path = sys._MEIPASS
@@ -121,17 +153,13 @@ VECTOR_LAYERS_VISIBILITY = DEFAULT_VECTOR_LAYERS_VISIBILITY.copy()
 map_features_geodata = {}
 
 VECTOR_LAYER_CONFIGS = {
-    "ne_10m_coastline": {"type": "line", "color": (0, 60, 100), "default_on": True, "label": "Coastlines"},
+    "gshhs_h_land_fill": {"type": "polygon", "color": (42, 54, 38), "default_on": True, "label": "GSHHG High Land Fill", "source_layer": "gshhs_h_land", "cache_key": "gshhs_h_land", "shp_filename": "GSHHS_h_L1"},
+    "gshhs_h_coastline": {"type": "line", "color": (0, 60, 100), "default_on": True, "label": "GSHHG High Coastline", "source_layer": "gshhs_h_land", "cache_key": "gshhs_h_land", "shp_filename": "GSHHS_h_L1"},
     "ne_10m_admin_0_boundary_lines_land": {"type": "line", "color": (80, 80, 80), "default_on": True, "label": "Country Borders (Lines)"},
-    "ne_10m_admin_0_countries": {"type": "polygon", "color": (70, 70, 70), "default_on": False, "label": "Countries (Fill)"},
     "ne_10m_lakes": {"type": "polygon", "color": (50, 80, 120), "default_on": True, "label": "Lakes (Fill)"},
     "ne_10m_rivers_lake_centerlines": {"type": "line", "color": (80, 120, 150), "default_on": False, "label": "Rivers"},
-    "ne_10m_land": {"type": "polygon", "color": (40, 50, 30), "default_on": False, "label": "Land Areas (Fill)"},
-    "ne_10m_ocean": {"type": "polygon", "color": (20, 30, 50), "default_on": False, "label": "Ocean Areas (Fill)"},
-    "ne_10m_minor_islands": {"type": "polygon", "color": (50, 60, 40), "default_on": False, "label": "Minor Islands (Fill)"},
     "ne_10m_urban_areas": {"type": "polygon", "color": (60, 60, 60), "default_on": False, "label": "Urban Areas (Fill)"},
     "ne_10m_populated_places": {"type": "point", "color": (200, 200, 100), "default_on": False, "label": "Populated Places"},
-    "ne_10m_geography_regions_polys": {"type": "polygon", "color": (80, 70, 60), "default_on": False, "label": "Geo Regions (Fill)"},
 }
 for layer_key, config_val in VECTOR_LAYER_CONFIGS.items():
     VECTOR_LAYERS_VISIBILITY[layer_key] = config_val.get("default_on", False)
@@ -151,6 +179,8 @@ def load_config(config_path):
         "gain": DEFAULT_DUMP1090_GAIN, "lat": DEFAULT_LAT_DEG, "lon": DEFAULT_LON_DEG, "alt_m": DEFAULT_ALT_M,
         "aircraft_timeout": DEFAULT_AIRCRAFT_TIMEOUT_SEC, "pred_interval": DEFAULT_PREDICTION_INTERVAL_SEC,
         "pred_horizon": DEFAULT_PREDICTION_HORIZON_SEC, "pred_step": DEFAULT_PREDICTION_STEP_SEC,
+        "prediction_average_sec": DEFAULT_PREDICTION_AVERAGE_SEC,
+        "event_min_elevation_deg": DEFAULT_EVENT_MIN_ELEVATION_DEG,
         "conflict_angle": DEFAULT_CONFLICT_ANGLE_DEG, "event_timeout": EVENT_TIMEOUT,
         "conflict_radius_km": CONFLICT_RADIUS_KM, "history_minutes": DEFAULT_AIRCRAFT_HISTORY_MINUTES,
         "show_airport_types": DEFAULT_SHOW_AIRPORT_TYPES, "show_navaid_types": DEFAULT_SHOW_NAVAID_TYPES,
@@ -268,8 +298,12 @@ HOST = loaded_settings["host"]; PORT = loaded_settings["port"]
 DUMP1090_DEVICE_INDEX = loaded_settings["device_index"]; DUMP1090_GAIN = loaded_settings["gain"]
 USER_LAT = loaded_settings["lat"]; USER_LON = loaded_settings["lon"]; USER_ALT = loaded_settings["alt_m"]
 USER_ALT_FT = USER_ALT * 3.28084
+TERRAIN_ALT_M = USER_ALT
+TERRAIN_ELEVATION_LOOKUP = None
 AIRCRAFT_TIMEOUT = loaded_settings["aircraft_timeout"]; PREDICTION_INTERVAL = loaded_settings["pred_interval"]
 PREDICTION_HORIZON = loaded_settings["pred_horizon"]; PREDICTION_STEP = loaded_settings["pred_step"]
+PREDICTION_AVERAGE_SEC = loaded_settings.get("prediction_average_sec", DEFAULT_PREDICTION_AVERAGE_SEC)
+EVENT_MIN_ELEVATION_DEG = loaded_settings.get("event_min_elevation_deg", DEFAULT_EVENT_MIN_ELEVATION_DEG)
 CONFLICT_ANGLE_DEG = loaded_settings["conflict_angle"]; EVENT_TIMEOUT = loaded_settings["event_timeout"]
 CONFLICT_RADIUS_KM = loaded_settings["conflict_radius_km"]; AIRCRAFT_HISTORY_MINUTES = loaded_settings["history_minutes"]
 SHOW_AIRPORT_TYPES = loaded_settings["show_airport_types"]; SHOW_NAVAID_TYPES = loaded_settings["show_navaid_types"]
@@ -333,6 +367,7 @@ def start_dump1090_process():
 eph = None; ts = None; observer_topos = None
 A = 6378.137; F = 1 / 298.257223563; B = A * (1 - F)
 airports_data = []; runways_data = collections.defaultdict(list); navaids_data = []
+_RUNWAY_END_CACHE = None; _RUNWAY_END_CACHE_SOURCE = None
 csv_headers = ['msg_type', 'icao', 'callsign', 'altitude', 'speed', 'track', 'lat', 'lon', 'vs', 'squawk', 'timestamp']
 CSV_OUTPUT = False; CSV_FILENAME = 'adsb_data.csv'
 def add_log(msg): print(f"[LOG] {datetime.now(timezone.utc).strftime('%H:%M:%S')} - {msg}")
@@ -371,9 +406,17 @@ def parse_basestation_line(line):
         timestamp=datetime.now(timezone.utc)
         if lat is not None and not(-90<=lat<=90):lat=None
         if lon is not None and not(-180<=lon<=180):lon=None
-        vs_eff=0 if vs is not None and abs(vs)<64 else vs
+        vs_eff=normalize_vertical_speed(vs)
         return{'msg_type':msg_type,'icao':icao,'callsign':callsign,'altitude':altitude,'speed':speed,'track':track,'lat':lat,'lon':lon,'vs':vs_eff,'squawk':squawk,'timestamp':timestamp,'conflict':None,'event_ids':set()}
     except(ValueError,IndexError):return None
+def normalize_vertical_speed(vs_fpm):
+    if vs_fpm is None:
+        return None
+    try:
+        vs_fpm = float(vs_fpm)
+    except (TypeError, ValueError):
+        return vs_fpm
+    return 0 if abs(vs_fpm) <= 64 else vs_fpm
 def haversine(lat1, lon1, lat2, lon2):
     R=EARTH_RADIUS_KM;
     if None in[lat1,lon1,lat2,lon2]:return float('inf')
@@ -393,6 +436,63 @@ def spherical_to_cartesian(lat, lon, altitude_ft):
     if N_den==0:return None
     N=A/N_den;X=(N+h)*cos_l*cos(lon_r);Y=(N+h)*cos_l*sin(lon_r);Z=(N*(1-e2)+h)*sin_l
     return(X,Y,Z)
+def cartesian_to_geodetic(x, y, z):
+    e2 = 2 * F - F ** 2
+    ep2 = (A ** 2 - B ** 2) / (B ** 2)
+    p = hypot(x, y)
+    if p < 1e-12:
+        return (90.0 if z >= 0 else -90.0), 0.0
+    theta = atan2(z * A, p * B)
+    lon = atan2(y, x)
+    lat = atan2(z + ep2 * B * sin(theta) ** 3, p - e2 * A * cos(theta) ** 3)
+    return degrees(lat), (degrees(lon) + 180.0) % 360.0 - 180.0
+def enu_to_ecef_unit(east, north, up, lat_deg, lon_deg):
+    lat_r, lon_r = radians(lat_deg), radians(lon_deg)
+    x = -sin(lon_r) * east - sin(lat_r) * cos(lon_r) * north + cos(lat_r) * cos(lon_r) * up
+    y = cos(lon_r) * east - sin(lat_r) * sin(lon_r) * north + cos(lat_r) * sin(lon_r) * up
+    z = cos(lat_r) * north + sin(lat_r) * up
+    mag = sqrt(x * x + y * y + z * z)
+    if mag <= 0:
+        return None
+    return (x / mag, y / mag, z / mag)
+def ray_wgs84_intersection(origin, direction, elevation_m=0.0):
+    ox, oy, oz = origin
+    dx, dy, dz = direction
+    h_km = m_to_km(elevation_m or 0.0)
+    a2, b2 = (A + h_km) * (A + h_km), (B + h_km) * (B + h_km)
+    qa = (dx * dx + dy * dy) / a2 + (dz * dz) / b2
+    qb = 2.0 * ((ox * dx + oy * dy) / a2 + (oz * dz) / b2)
+    qc = (ox * ox + oy * oy) / a2 + (oz * oz) / b2 - 1.0
+    disc = qb * qb - 4.0 * qa * qc
+    if qa <= 0 or disc < 0:
+        return None
+    root = sqrt(disc)
+    candidates = [(-qb - root) / (2.0 * qa), (-qb + root) / (2.0 * qa)]
+    positives = [t for t in candidates if t > 0]
+    if not positives:
+        return None
+    t = min(positives)
+    return (ox + dx * t, oy + dy * t, oz + dz * t)
+def offset_surface_point(lat, lon, east_km, north_km):
+    distance_km = hypot(east_km, north_km)
+    if distance_km <= 0:
+        return lat, lon
+    bearing = (degrees(atan2(east_km, north_km)) + 360.0) % 360.0
+    return destination_point(lat, lon, bearing, distance_km)
+def point_to_segment_distance_km(lat, lon, lat1, lon1, lat2, lon2):
+    mean_lat = radians((lat + lat1 + lat2) / 3.0)
+    km_per_deg_lat = 111.32
+    km_per_deg_lon = max(1e-6, 111.32 * cos(mean_lat))
+    px, py = lon * km_per_deg_lon, lat * km_per_deg_lat
+    ax, ay = lon1 * km_per_deg_lon, lat1 * km_per_deg_lat
+    bx, by = lon2 * km_per_deg_lon, lat2 * km_per_deg_lat
+    dx, dy = bx - ax, by - ay
+    denom = dx * dx + dy * dy
+    if denom <= 0:
+        return hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / denom))
+    cx, cy = ax + t * dx, ay + t * dy
+    return hypot(px - cx, py - cy)
 def angle_between(user_lat, user_lon, user_alt_ft, lat1, lon1, alt1_ft, lat2, lon2, alt2_ft):
     u,a1,a2=spherical_to_cartesian(user_lat,user_lon,user_alt_ft),spherical_to_cartesian(lat1,lon1,alt1_ft),spherical_to_cartesian(lat2,lon2,alt2_ft)
     if None in[u,a1,a2]:return 180.0
@@ -401,9 +501,91 @@ def angle_between(user_lat, user_lon, user_alt_ft, lat1, lon1, alt1_ft, lat2, lo
     if m1_sq==0 or m2_sq==0:return 180.0
     dot=sum(c1*c2 for c1,c2 in zip(v1,v2))
     return degrees(acos(max(-1.0,min(1.0,dot/(sqrt(m1_sq)*sqrt(m2_sq))))))
+def aircraft_azel_approx(lat, lon, altitude_ft, user_lat=None, user_lon=None, user_alt_ft=None):
+    if user_lat is None: user_lat = USER_LAT
+    if user_lon is None: user_lon = USER_LON
+    if user_alt_ft is None: user_alt_ft = USER_ALT_FT
+    observer = spherical_to_cartesian(user_lat, user_lon, user_alt_ft)
+    target = spherical_to_cartesian(lat, lon, altitude_ft)
+    if observer is None or target is None:
+        return None, None
+    dx, dy, dz = target[0] - observer[0], target[1] - observer[1], target[2] - observer[2]
+    lat_r, lon_r = radians(user_lat), radians(user_lon)
+    east = -sin(lon_r) * dx + cos(lon_r) * dy
+    north = -sin(lat_r) * cos(lon_r) * dx - sin(lat_r) * sin(lon_r) * dy + cos(lat_r) * dz
+    up = cos(lat_r) * cos(lon_r) * dx + cos(lat_r) * sin(lon_r) * dy + sin(lat_r) * dz
+    horizontal = hypot(east, north)
+    if horizontal == 0 and up == 0:
+        return None, None
+    az = (degrees(atan2(east, north)) + 360.0) % 360.0
+    el = degrees(atan2(up, horizontal))
+    return az, el
+def angular_separation_azel(az1_deg, el1_deg, az2_deg, el2_deg):
+    az1, el1, az2, el2 = map(radians, [az1_deg, el1_deg, az2_deg, el2_deg])
+    cos_sep = sin(el1) * sin(el2) + cos(el1) * cos(el2) * cos(az1 - az2)
+    return degrees(acos(max(-1.0, min(1.0, cos_sep))))
+def angle_delta_deg(a, b):
+    return (float(a) - float(b) + 180.0) % 360.0 - 180.0
+def mean_angle_deg(values):
+    vals = [float(v) for v in values if v is not None]
+    if not vals:
+        return None
+    sin_sum = sum(sin(radians(v)) for v in vals)
+    cos_sum = sum(cos(radians(v)) for v in vals)
+    if abs(sin_sum) < 1e-12 and abs(cos_sum) < 1e-12:
+        return vals[-1]
+    return (degrees(atan2(sin_sum, cos_sum)) + 360.0) % 360.0
+def fitted_history_track(ac_data, now=None, window_sec=20.0):
+    if now is None:
+        now = datetime.now(timezone.utc)
+    points = []
+    cutoff = now - timedelta(seconds=window_sec)
+    for item in list(ac_data.get('history', [])):
+        try:
+            t_item, lat, lon, alt = item
+        except (TypeError, ValueError):
+            continue
+        if t_item >= cutoff and lat is not None and lon is not None:
+            points.append((t_item, float(lat), float(lon)))
+    if len(points) < 4:
+        return None
+    points = points[-10:]
+    t0 = points[0][0]
+    mean_lat = sum(p[1] for p in points) / len(points)
+    mean_lon = sum(p[2] for p in points) / len(points)
+    km_per_deg_lat = 111.32
+    km_per_deg_lon = max(8.0, 111.32 * cos(radians(mean_lat)))
+    samples = [((p[0] - t0).total_seconds(), (p[2] - mean_lon) * km_per_deg_lon, (p[1] - mean_lat) * km_per_deg_lat) for p in points]
+    t_mean = sum(s[0] for s in samples) / len(samples)
+    x_mean = sum(s[1] for s in samples) / len(samples)
+    y_mean = sum(s[2] for s in samples) / len(samples)
+    denom = sum((s[0] - t_mean) ** 2 for s in samples)
+    if denom <= 1e-6:
+        return None
+    vx = sum((s[0] - t_mean) * (s[1] - x_mean) for s in samples) / denom
+    vy = sum((s[0] - t_mean) * (s[2] - y_mean) for s in samples) / denom
+    speed_kmh = hypot(vx, vy) * 3600.0
+    if speed_kmh < 80.0:
+        return None
+    track = (degrees(atan2(vx, vy)) + 360.0) % 360.0
+    residuals = []
+    for t_sec, x, y in samples:
+        px = x_mean + vx * (t_sec - t_mean)
+        py = y_mean + vy * (t_sec - t_mean)
+        residuals.append(hypot(x - px, y - py))
+    rms = sqrt(sum(r * r for r in residuals) / len(residuals))
+    segment_bearings = [calculate_bearing(points[i - 1][1], points[i - 1][2], points[i][1], points[i][2]) for i in range(1, len(points)) if haversine(points[i - 1][1], points[i - 1][2], points[i][1], points[i][2]) > 0.03]
+    if len(segment_bearings) >= 3:
+        mean_bearing = mean_angle_deg(segment_bearings)
+        max_turn = max(abs(angle_delta_deg(bearing, mean_bearing)) for bearing in segment_bearings)
+        if max_turn > 12.0:
+            return None
+    if rms > 0.12:
+        return None
+    return {"track": track, "speed_kts": speed_kmh / 1.852, "rms_km": rms}
 def predict_position(lat, lon, altitude_ft, speed_kts, track_deg, delta_t_sec, vs_fpm):
     if None in[lat,lon,altitude_ft,speed_kts,track_deg,vs_fpm]:return None,None,None
-    vs_eff=0 if abs(vs_fpm)<64 else vs_fpm;alt_chg=(vs_eff/60.0)*delta_t_sec;new_alt=altitude_ft+alt_chg
+    vs_eff=normalize_vertical_speed(vs_fpm);alt_chg=(vs_eff/60.0)*delta_t_sec;new_alt=altitude_ft+alt_chg
     eff_rad=effective_radius_at_lat(lat,altitude_ft+alt_chg/2.0)
     if eff_rad<=0:return None,None,None
     dist_km=speed_kts*1.852/3600.0*delta_t_sec
@@ -415,6 +597,79 @@ def predict_position(lat, lon, altitude_ft, speed_kts, track_deg, delta_t_sec, v
     d_lon_r=atan2(l2_y,l2_x)if not(abs(l2_y)<1e-12 and abs(l2_x)<1e-12)else 0.0
     n_lon_r=lon_r+d_lon_r;n_lat,n_lon=degrees(n_lat_r),degrees(n_lon_r)
     return n_lat,(n_lon+180)%360-180,new_alt
+def apparent_angular_diameter_deg(apparent_position, body_name):
+    radius_km = SUN_RADIUS_KM if body_name == 'sun' else MOON_RADIUS_KM if body_name == 'moon' else None
+    fallback = SUN_ANGULAR_DIAMETER_DEG if body_name == 'sun' else MOON_ANGULAR_DIAMETER_DEG
+    if radius_km is None:
+        return fallback
+    try:
+        distance_km = apparent_position.distance().km
+        if distance_km and distance_km > 0:
+            return degrees(2.0 * atan2(radius_km, distance_km))
+    except Exception:
+        pass
+    return fallback
+def averaged_prediction_motion(ac_data, now=None, window_sec=None):
+    """
+    Return speed, track, and vertical speed smoothed over recent telemetry.
+    The current aircraft position is still used as the prediction origin; only
+    motion terms are averaged to reduce ADS-B jitter.
+    """
+    if window_sec is None:
+        window_sec = PREDICTION_AVERAGE_SEC
+    try:
+        window_sec = float(window_sec)
+    except (TypeError, ValueError):
+        window_sec = DEFAULT_PREDICTION_AVERAGE_SEC
+    if window_sec <= 0:
+        return ac_data.get('speed'), ac_data.get('track'), ac_data.get('vs')
+    if now is None:
+        now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=window_sec)
+    samples = []
+    for item in list(ac_data.get('telemetry_history', [])):
+        try:
+            ts_item, speed, track, vs = item
+        except (TypeError, ValueError):
+            continue
+        if ts_item >= cutoff and None not in (speed, track, vs):
+            samples.append((float(speed), float(track), float(vs)))
+    if not samples:
+        return ac_data.get('speed'), ac_data.get('track'), normalize_vertical_speed(ac_data.get('vs'))
+    avg_speed = sum(item[0] for item in samples) / len(samples)
+    avg_vs = normalize_vertical_speed(sum(item[2] for item in samples) / len(samples))
+    avg_track = mean_angle_deg([item[1] for item in samples])
+    if avg_track is None:
+        avg_track = ac_data.get('track')
+    fitted = fitted_history_track(ac_data, now=now, window_sec=max(12.0, window_sec * 2.0))
+    if fitted and avg_track is not None:
+        track_diff = abs(angle_delta_deg(fitted["track"], avg_track))
+        speed_diff = abs(fitted["speed_kts"] - avg_speed) / max(avg_speed, 1.0)
+        if 3.0 <= track_diff <= 35.0 and speed_diff <= 0.35:
+            avg_track = fitted["track"]
+    return avg_speed, avg_track, avg_vs
+def prediction_aircraft_state(ac_data, now=None):
+    if now is None:
+        now = datetime.now(timezone.utc)
+    state = ac_data.copy()
+    speed, track, vs = averaged_prediction_motion(ac_data, now=now)
+    state['speed'], state['track'], state['vs'] = speed, track, vs
+    field_times = ac_data.get('field_timestamps') or {}
+    position_update = field_times.get('position') or field_times.get('lat') or field_times.get('lon') or ac_data.get('timestamp')
+    altitude_update = field_times.get('altitude') or ac_data.get('timestamp')
+    if all(state.get(k) is not None for k in ('lat', 'lon', 'altitude', 'speed', 'track', 'vs')):
+        position_age_sec = max(0.0, (now - position_update).total_seconds()) if isinstance(position_update, datetime) else 0.0
+        altitude_age_sec = max(0.0, (now - altitude_update).total_seconds()) if isinstance(altitude_update, datetime) else position_age_sec
+        lat, lon, _ = predict_position(
+            state['lat'], state['lon'], state['altitude'],
+            state['speed'], state['track'], position_age_sec, 0
+        )
+        if lat is not None:
+            state['lat'], state['lon'] = lat, lon
+            state['altitude'] = state['altitude'] + (state['vs'] * altitude_age_sec / 60.0)
+            state['prediction_age_sec'] = position_age_sec
+            state['altitude_prediction_age_sec'] = altitude_age_sec
+    return state
 # --- High-precision Solver Helper Functions ---
 def get_3d_pos_at_t(ac_data, t_offset):
     """
@@ -463,119 +718,196 @@ def solve_closest_approach(ac1, ac2, t_center, window=1.5):
     t_min = (a + b) / 2
     min_dist_km = sqrt(distance_sq_func(t_min))
     return t_min, min_dist_km
+
+def calculate_transit_ground_slice(p_lat, p_lon, p_alt, body_name, event_time_utc, body_app=None):
+    if not eph or not ts or p_lat is None or p_lon is None or p_alt is None:
+        return None
+    try:
+        earth = eph['earth']
+        aircraft_observer = earth + wgs84.latlon(p_lat, p_lon, elevation_m=feet_to_km(p_alt) * 1000.0)
+        user_observer = earth + observer_topos if observer_topos else None
+        observer = user_observer or aircraft_observer
+        t_target = ts.utc(event_time_utc)
+        if body_app is None:
+            body_app = observer.at(t_target).observe(eph[body_name]).apparent()
+        b_alt, b_az, _ = body_app.altaz()
+        if b_alt.degrees < max(0.5, float(EVENT_MIN_ELEVATION_DEG or 0.0)):
+            return None
+
+        terrain_alt_m = float(globals().get('TERRAIN_ALT_M', USER_ALT) or 0.0)
+        terrain_source = 'fallback'
+        h_m = feet_to_km(p_alt) * 1000.0 - terrain_alt_m
+        if h_m <= 0:
+            return None
+
+        body_dia_deg = apparent_angular_diameter_deg(body_app, body_name)
+        az_r, el_r = b_az.radians, b_alt.radians
+        dir_lat = USER_LAT if user_observer else p_lat
+        dir_lon = USER_LON if user_observer else p_lon
+        toward_body = enu_to_ecef_unit(cos(el_r) * sin(az_r), cos(el_r) * cos(az_r), sin(el_r), dir_lat, dir_lon)
+        if toward_body is None:
+            return None
+        origin = spherical_to_cartesian(p_lat, p_lon, p_alt)
+        if origin is None:
+            return None
+
+        def _normalize_vec(vec):
+            mag = sqrt(sum(component * component for component in vec))
+            if mag <= 0:
+                return None
+            return tuple(component / mag for component in vec)
+
+        def _terrain_ray_hit(direction, initial_elev_m):
+            probe_m = float(initial_elev_m)
+            source = 'fallback'
+            hit_point = None
+            for _ in range(5):
+                hit_point = ray_wgs84_intersection(origin, direction, elevation_m=probe_m)
+                if hit_point is None:
+                    return None
+                probe_lat, probe_lon = cartesian_to_geodetic(*hit_point)
+                sampled_m = None
+                if sampled_m is not None:
+                    source = 'cache'
+                if sampled_m is None or abs(float(sampled_m) - probe_m) < 1.0:
+                    return hit_point, probe_m, source
+                probe_m = float(sampled_m)
+            return hit_point, probe_m, source
+
+        shadow_dir = _normalize_vec(tuple(-component for component in toward_body))
+        if shadow_dir is None:
+            return None
+        center_hit = _terrain_ray_hit(shadow_dir, terrain_alt_m)
+        if center_hit is None:
+            return None
+        hit, terrain_alt_m, terrain_source = center_hit
+        if hit is None:
+            return None
+        c_lat, c_lon = cartesian_to_geodetic(*hit)
+        h_m = feet_to_km(p_alt) * 1000.0 - terrain_alt_m
+        if h_m <= 0:
+            return None
+        half_width_km = m_to_km(h_m * tan(radians(body_dia_deg / 2.0)) / max(0.05, sin(b_alt.radians)))
+        shadow_bearing = calculate_bearing(p_lat, p_lon, c_lat, c_lon)
+        left_bearing = radians((shadow_bearing - 90.0) % 360.0)
+        east_km = half_width_km * sin(left_bearing)
+        north_km = half_width_km * cos(left_bearing)
+        l_lat, l_lon = offset_surface_point(c_lat, c_lon, east_km, north_km)
+        r_lat, r_lon = offset_surface_point(c_lat, c_lon, -east_km, -north_km)
+        side_vec = enu_to_ecef_unit(sin(left_bearing), cos(left_bearing), 0.0, c_lat, c_lon)
+        edge_scale = tan(radians(body_dia_deg / 2.0))
+        if side_vec is not None and edge_scale > 0:
+            left_dir = _normalize_vec(tuple(shadow_dir[i] + side_vec[i] * edge_scale for i in range(3)))
+            right_dir = _normalize_vec(tuple(shadow_dir[i] - side_vec[i] * edge_scale for i in range(3)))
+            left_hit = _terrain_ray_hit(left_dir, terrain_alt_m) if left_dir else None
+            right_hit = _terrain_ray_hit(right_dir, terrain_alt_m) if right_dir else None
+            if left_hit is not None:
+                l_lat, l_lon = cartesian_to_geodetic(*left_hit[0])
+                if left_hit[2] == 'cache':
+                    terrain_source = 'cache'
+            if right_hit is not None:
+                r_lat, r_lon = cartesian_to_geodetic(*right_hit[0])
+                if right_hit[2] == 'cache':
+                    terrain_source = 'cache'
+        return {
+            'left': (l_lat, l_lon),
+            'right': (r_lat, r_lon),
+            'center': (c_lat, c_lon),
+            'angular_diameter_deg': body_dia_deg,
+            'terrain_alt_m': terrain_alt_m,
+            'terrain_source': terrain_source,
+            'aircraft_agl_m': h_m,
+        }
+    except Exception:
+        return None
+
 def calculate_transit_rectangle_for_aircraft(icao_code, current_time_utc):
     """
-    Calculate the ground projection strip for aircraft transits of celestial bodies (Sun/Moon).
-    Improvement: Uses polyline fitting for accurate path curvature instead of a simple rectangular approximation.
+    Calculate Sun/Moon transit ground strips by sampling the aircraft path and
+    projecting each body's apparent disc onto the ground.
     """
-    global aircraft_dict, eph, ts, lock, PREDICTION_HORIZON, SUN_ANGULAR_DIAMETER_DEG, MOON_ANGULAR_DIAMETER_DEG
-    
     transit_data = {'sun': None, 'moon': None}
-    
     if not eph or not ts: return transit_data
     
     with lock:
         ac_data = aircraft_dict.get(icao_code)
     
-    if not ac_data: return transit_data
+    if not ac_data or is_probably_landed_aircraft(ac_data, current_time_utc): return transit_data
+    ac_data = prediction_aircraft_state(ac_data, current_time_utc)
     
     # Fetch basic aircraft telemetry/data
     lat, lon, alt, spd, trk, vs = (ac_data.get(k) for k in ('lat', 'lon', 'altitude', 'speed', 'track', 'vs'))
     if None in [lat, lon, alt, spd, trk, vs]: return transit_data
-    
-    # Helper function: Calculate the shadow slice (Left, Right, Center) at a specific timestamp
-    def get_shadow_slice(t_offset, body_name, ang_dia_deg):
-        # 1. Predict aircraft position
+
+    def transit_slice(t_offset, body_name):
         p_lat, p_lon, p_alt = predict_position(lat, lon, alt, spd, trk, t_offset, vs)
         if p_lat is None: return None
-        
-        # 2. Calculate the celestial body's topocentric position for this location and time
-        # Note: We assume the projection surface is at sea level (elevation_m=0), 
-        # which determines the shadow's footprint location on the ground.
-        g_obs = Topos(latitude_degrees=p_lat, longitude_degrees=p_lon, elevation_m=0.0)
-        t_target = ts.utc(current_time_utc + timedelta(seconds=t_offset))
-        
-        try:
-            app = (eph['earth'] + g_obs).at(t_target).observe(eph[body_name]).apparent()
-            b_alt, b_az, _ = app.altaz()
-            
-            # Only calculate projection if celestial altitude > 0.5° 
-            # (to avoid tangent infinity or near-infinite projection distances)
-            if b_alt.degrees < 0.5: return None
-            
-            # 3. Calculate projection geometry
-            # h_m: Aircraft altitude relative to the ground (meters)
-            h_m = feet_to_km(p_alt) * 1000.0
-            if h_m <= 0: return None
-            
-            # off_m: Horizontal offset from the sub-aircraft point to the shadow center
-            # Formula: dist = h / tan(Elevation)
-            off_m = h_m / tan(b_alt.radians)
-            
-            # 阴影方向是天体方位的反方向 (180度)
-            shadow_bearing = (b_az.degrees + 180) % 360
-            
-            # Shadow bearing is the reciprocal of the celestial body's azimuth (180° offset)
-            # Coordinates of the shadow center
-            c_lat, c_lon = destination_point(p_lat, p_lon, shadow_bearing, m_to_km(off_m))
-            
-            # 4. Calculate shadow width (W)
-            # Width is determined by celestial angular diameter and aircraft altitude. 
-            # Approx: W = 2 * h * tan(AngDia/2) / sin(Elevation)
-            
-            # Simpler geometric approximation for long projections: W = off_m * tan(AngDia)
-            
-            # Alternative: simple physical occlusion geometry:
-            # Half-width of field of view = h / tan(Elevation) * tan(AngDia/2) ?
-            
-            # Using simple tangent projection:
-            # half_w_perp: Width perpendicular to light rays = h * tan(ang_dia/2)
-            # half_w_ground: Projected width on the ground = half_w_perp / sin(Elevation)
-            
-            half_w_ground_m = (h_m * tan(radians(ang_dia_deg / 2.0))) / sin(b_alt.radians)
-            
-            # Calculate the left and right vertices of the slice (perpendicular to shadow bearing)
-            l_lat, l_lon = destination_point(c_lat, c_lon, (shadow_bearing - 90) % 360, m_to_km(half_w_ground_m))
-            r_lat, r_lon = destination_point(c_lat, c_lon, (shadow_bearing + 90) % 360, m_to_km(half_w_ground_m))
-            
-            return (l_lat, l_lon), (r_lat, r_lon), (c_lat, c_lon)
-            
-        except Exception:
+        ground = calculate_transit_ground_slice(p_lat, p_lon, p_alt, body_name, current_time_utc + timedelta(seconds=t_offset))
+        if not ground:
             return None
+        return {
+            'offset_sec': float(t_offset),
+            'left': ground['left'],
+            'right': ground['right'],
+            'center': ground['center'],
+            'angular_diameter_deg': ground['angular_diameter_deg'],
+            'terrain_alt_m': ground.get('terrain_alt_m'),
+            'terrain_source': ground.get('terrain_source'),
+            'aircraft_agl_m': ground.get('aircraft_agl_m'),
+        }
 
-    # Generate multi-segment polygon
-    # Number of segments: e.g., sampled every 10 seconds, or determined dynamically based on prediction horizon
-
-    step_sec = 10.0
-    steps = int(PREDICTION_HORIZON / step_sec) + 1
+    step_sec = max(30.0, min(60.0, PREDICTION_HORIZON / 3.0))
+    base_offsets = {0.0, min(step_sec, PREDICTION_HORIZON), PREDICTION_HORIZON}
+    event_offsets = {'sun': set(), 'moon': set()}
+    event_slices = {'sun': {}, 'moon': {}}
+    with lock:
+        active_events = list(event_dict.items())
+    for eid, ev in active_events:
+        ev_type = ev.get('type')
+        if not isinstance(eid, tuple) or not eid or eid[0] != icao_code:
+            continue
+        if ev_type not in ('AC-Sun', 'AC-Moon') or not isinstance(ev.get('time'), datetime):
+            continue
+        body_key = 'sun' if ev_type == 'AC-Sun' else 'moon'
+        event_offset = (ev['time'] - current_time_utc).total_seconds()
+        if -EVENT_TIMEOUT <= event_offset <= PREDICTION_HORIZON:
+            stored_slice = ev.get('transit_slice')
+            if isinstance(stored_slice, dict):
+                event_slices[body_key][round(event_offset, 3)] = stored_slice
+                event_offsets[body_key].add(event_offset)
+            for delta in (-10.0, -5.0, 0.0, 5.0, 10.0):
+                sample_offset = event_offset + delta
+                if -EVENT_TIMEOUT <= sample_offset <= PREDICTION_HORIZON:
+                    event_offsets[body_key].add(sample_offset)
     
-    for body, dia in [('sun', SUN_ANGULAR_DIAMETER_DEG), ('moon', MOON_ANGULAR_DIAMETER_DEG)]:
-        left_points = []
-        right_points = []
-        centers = [] 
-        
-        valid_strip = True
-        for i in range(steps):
-            dt = i * step_sec
-            res = get_shadow_slice(dt, body, dia)
-            if res:
-                lp, rp, cp = res
-                left_points.append(lp)
-                right_points.append(rp)
-                centers.append(cp)
+    for body in ('sun', 'moon'):
+        offsets = sorted(base_offsets | event_offsets[body])
+        left_points, right_points, centers, diameters, slices = [], [], [], [], []
+        for offset in offsets:
+            stored_slice = event_slices[body].get(round(offset, 3))
+            if stored_slice:
+                res = stored_slice.copy()
+                res['offset_sec'] = float(offset)
+                res['left'] = tuple(res['left'])
+                res['right'] = tuple(res['right'])
+                res['center'] = tuple(res['center'])
             else:
-                # If the sequence is interrupted (e.g., sunset), stop or break for rendering safety
-                # Simple implementation: return None if it starts empty; 
-                # if it breaks midway, only render up to the point of interruption.
-                if i == 0: valid_strip = False
-                break
+                res = transit_slice(offset, body)
+            if not res:
+                continue
+            lp, rp, cp, dia = res['left'], res['right'], res['center'], res['angular_diameter_deg']
+            left_points.append(lp)
+            right_points.append(rp)
+            centers.append(cp)
+            diameters.append(dia)
+            slices.append(res)
         
-        if valid_strip and len(left_points) > 1:
-            # Construct a closed polygon vertex sequence: L0 -> Ln -> Rn -> R0
-            poly_geo = left_points + right_points[::-1]
+        if len(left_points) > 1:
             transit_data[body] = {
-                'polygon': poly_geo, 
-                'centerline': centers
+                'polygon': left_points + right_points[::-1],
+                'centerline': centers,
+                'slices': slices,
+                'angular_diameter_deg': sum(diameters) / len(diameters)
             }
 
     return transit_data
@@ -588,7 +920,8 @@ def load_airports(filename=AIRPORTS_CSV, types_to_show=None):
             for row in r:
                 try:
                     ty,la,lo=row.get('type'),row.get('latitude_deg'),row.get('longitude_deg')
-                    if ty in valid_types and la and lo:data.append({'ident':row['ident'],'type':ty,'name':row['name'],'lat':float(la),'lon':float(lo),'country':row.get('iso_country','')});c+=1
+                    elev_ft=float(row['elevation_ft']) if row.get('elevation_ft') not in (None, '') else None
+                    if ty in valid_types and la and lo:data.append({'ident':row['ident'],'type':ty,'name':row['name'],'lat':float(la),'lon':float(lo),'elevation_ft':elev_ft,'country':row.get('iso_country','')});c+=1
                     else:s+=1
                 except(ValueError,TypeError,KeyError):s+=1
         print(f"Loaded {c} airports ({'/'.join(types_to_show)}) from {filename}. Skipped {s} rows.")
@@ -607,7 +940,11 @@ def load_runways(filename=RUNWAYS_CSV, airport_idents_to_load=None):
                     ap_id=row.get('airport_ident')
                     if ap_id in airport_idents_to_load:
                         le_lat,le_lon,he_lat,he_lon,le,wi=float(row['le_latitude_deg']),float(row['le_longitude_deg']),float(row['he_latitude_deg']),float(row['he_longitude_deg']),float(row.get('length_ft',0)),float(row.get('width_ft',0))
-                        data[ap_id].append({'le_lat':le_lat,'le_lon':le_lon,'he_lat':he_lat,'he_lon':he_lon,'length_ft':le,'width_ft':wi,'le_ident':row.get('le_ident',''),'he_ident':row.get('he_ident','')});c+=1
+                        le_elev=float(row['le_elevation_ft']) if row.get('le_elevation_ft') not in (None, '') else None
+                        he_elev=float(row['he_elevation_ft']) if row.get('he_elevation_ft') not in (None, '') else None
+                        le_hdg=float(row['le_heading_degT']) if row.get('le_heading_degT') not in (None, '') else None
+                        he_hdg=float(row['he_heading_degT']) if row.get('he_heading_degT') not in (None, '') else None
+                        data[ap_id].append({'le_lat':le_lat,'le_lon':le_lon,'he_lat':he_lat,'he_lon':he_lon,'length_ft':le,'width_ft':wi,'le_ident':row.get('le_ident',''),'he_ident':row.get('he_ident',''),'le_elevation_ft':le_elev,'he_elevation_ft':he_elev,'le_heading_degT':le_hdg,'he_heading_degT':he_hdg});c+=1
                     else:s+=1
                 except(ValueError,TypeError,KeyError):s+=1
         print(f"Loaded {c} runways for {len(airport_idents_to_load)} airport(s) from {filename}. Skipped {s} rows.")
@@ -644,23 +981,320 @@ def calculate_glideslope_details(runway_info, selected_runway_end_ident, airport
     if s_lat is None or app_brg is None:return None
     e_lat,e_lon=destination_point(s_lat,s_lon,app_brg,gs_len)
     return{'start_lat':s_lat,'start_lon':s_lon,'end_lat':e_lat,'end_lon':e_lon,'bearing_deg':app_brg,'length_km':gs_len,'runway_end_ident':selected_runway_end_ident}
+
+def runway_end_candidates():
+    global _RUNWAY_END_CACHE, _RUNWAY_END_CACHE_SOURCE
+    source_sig = (id(airports_data), id(runways_data))
+    if _RUNWAY_END_CACHE is not None and _RUNWAY_END_CACHE_SOURCE == source_sig:
+        return _RUNWAY_END_CACHE
+    airport_by_ident = {apt.get('ident'): apt for apt in airports_data}
+    candidates = []
+    for airport_ident, runways in runways_data.items():
+        airport = airport_by_ident.get(airport_ident, {})
+        airport_elev = airport.get('elevation_ft')
+        airport_type = airport.get('type')
+        if airport_type == 'heliport':
+            continue
+        for runway in runways:
+            try:
+                le_lat, le_lon = runway['le_lat'], runway['le_lon']
+                he_lat, he_lon = runway['he_lat'], runway['he_lon']
+            except KeyError:
+                continue
+            le_bearing = calculate_bearing(he_lat, he_lon, le_lat, le_lon)
+            he_bearing = calculate_bearing(le_lat, le_lon, he_lat, he_lon)
+            candidates.append({
+                'airport_ident': airport_ident,
+                'runway_ident': runway.get('le_ident') or '',
+                'lat': le_lat,
+                'lon': le_lon,
+                'opposite_lat': he_lat,
+                'opposite_lon': he_lon,
+                'approach_bearing': le_bearing,
+                'elevation_ft': runway.get('le_elevation_ft') if runway.get('le_elevation_ft') is not None else airport_elev,
+            })
+            candidates.append({
+                'airport_ident': airport_ident,
+                'runway_ident': runway.get('he_ident') or '',
+                'lat': he_lat,
+                'lon': he_lon,
+                'opposite_lat': le_lat,
+                'opposite_lon': le_lon,
+                'approach_bearing': he_bearing,
+                'elevation_ft': runway.get('he_elevation_ft') if runway.get('he_elevation_ft') is not None else airport_elev,
+            })
+    _RUNWAY_END_CACHE = candidates
+    _RUNWAY_END_CACHE_SOURCE = source_sig
+    return _RUNWAY_END_CACHE
+
+def nearby_runway_end_candidates(lat, lon, radius_km):
+    lat_window = radius_km / 111.32
+    lon_window = radius_km / max(8.0, 111.32 * cos(radians(lat)))
+    for end in runway_end_candidates():
+        if abs(end['lat'] - lat) <= lat_window and abs(end['lon'] - lon) <= lon_window:
+            yield end
+
+def approach_metrics_for_runway_end(lat, lon, track, end):
+    threshold_dist = haversine(lat, lon, end['lat'], end['lon'])
+    if not np.isfinite(threshold_dist):
+        return None
+    far_lat, far_lon = destination_point(end['lat'], end['lon'], end['approach_bearing'], ILS_LOC_MAX_DISTANCE_KM)
+    lateral_km = point_to_segment_distance_km(lat, lon, end['lat'], end['lon'], far_lat, far_lon)
+    inbound_course = (end['approach_bearing'] + 180.0) % 360.0
+    track_delta = abs(angle_delta_deg(track, inbound_course)) if track is not None else 180.0
+    bearing_to_threshold = calculate_bearing(lat, lon, end['lat'], end['lon'])
+    closing_delta = abs(angle_delta_deg(track, bearing_to_threshold)) if track is not None else 180.0
+    corridor_km = max(0.35, min(1.8, threshold_dist * 0.12 + 0.12))
+    return {
+        'threshold_dist_km': threshold_dist,
+        'lateral_km': lateral_km,
+        'track_delta_deg': track_delta,
+        'closing_delta_deg': closing_delta,
+        'corridor_km': corridor_km,
+    }
+
+def nearest_runway_threshold_match(lat, lon, alt):
+    best = None
+    for end in nearby_runway_end_candidates(lat, lon, 1.0):
+        dist = haversine(lat, lon, end['lat'], end['lon'])
+        if not np.isfinite(dist) or dist > max(0.8, LANDED_RUNWAY_THRESHOLD_KM * 5.0):
+            continue
+        elev = end.get('elevation_ft')
+        if elev is None:
+            continue
+        if best is None or dist < best['threshold_dist_km']:
+            best = {'end': end, 'threshold_dist_km': dist, 'elevation_ft': elev}
+    if not best:
+        return None
+    try:
+        alt = float(alt)
+    except (TypeError, ValueError):
+        return None
+    if best['threshold_dist_km'] <= LANDED_RUNWAY_THRESHOLD_KM and alt <= best['elevation_ft'] + LANDED_ELEVATION_MARGIN_FT:
+        return best
+    return None
+
+def detect_localizer_approach(ac_data, now=None):
+    if now is None:
+        now = datetime.now(timezone.utc)
+    lat, lon, speed, track, vs = ac_data.get('lat'), ac_data.get('lon'), ac_data.get('speed'), ac_data.get('track'), ac_data.get('vs')
+    if None in [lat, lon, speed, track, vs]:
+        return None
+    try:
+        lat, lon, speed, track = float(lat), float(lon), float(speed), float(track)
+        vs = float(vs)
+    except (TypeError, ValueError):
+        return None
+    if speed < 35.0 or vs >= 0.0:
+        return None
+    previous_loc = ac_data.get('approach_details') if ac_data.get('approach_status') == 'LOC' else None
+    if isinstance(previous_loc, dict):
+        airport_id = previous_loc.get('airport')
+        runway_id = previous_loc.get('runway')
+        for end in nearby_runway_end_candidates(lat, lon, ILS_LOC_MAX_DISTANCE_KM + 3.0):
+            if end.get('airport_ident') != airport_id or end.get('runway_ident') != runway_id:
+                continue
+            threshold_dist = haversine(lat, lon, end['lat'], end['lon'])
+            if not np.isfinite(threshold_dist) or threshold_dist > ILS_LOC_MAX_DISTANCE_KM + 3.0:
+                return None
+            far_lat, far_lon = destination_point(end['lat'], end['lon'], end['approach_bearing'], ILS_LOC_MAX_DISTANCE_KM)
+            lateral_km = point_to_segment_distance_km(lat, lon, end['lat'], end['lon'], far_lat, far_lon)
+            corridor_km = max(0.8, min(3.0, threshold_dist * 0.22 + 0.35))
+            if lateral_km > corridor_km:
+                return None
+            return {
+                'status': 'LOC',
+                'airport': end['airport_ident'],
+                'runway': end['runway_ident'],
+                'runway_elevation_ft': end.get('elevation_ft'),
+                'distance_km': threshold_dist,
+                'lateral_km': lateral_km,
+                'track_delta_deg': previous_loc.get('track_delta_deg'),
+            }
+    best = None
+    for end in nearby_runway_end_candidates(lat, lon, ILS_LOC_MAX_DISTANCE_KM + 1.0):
+        metrics = approach_metrics_for_runway_end(lat, lon, track, end)
+        if not metrics:
+            continue
+        if not (0.12 <= metrics['threshold_dist_km'] <= ILS_LOC_MAX_DISTANCE_KM):
+            continue
+        if metrics['track_delta_deg'] > ILS_LOC_MAX_HEADING_DELTA_DEG or metrics['closing_delta_deg'] > 35.0:
+            continue
+        if metrics['lateral_km'] > metrics['corridor_km']:
+            continue
+        score = metrics['lateral_km'] + metrics['track_delta_deg'] * 0.03 + metrics['threshold_dist_km'] * 0.01
+        if best is None or score < best['score']:
+            best = {'end': end, 'metrics': metrics, 'score': score}
+    if not best:
+        return None
+
+    end = best['end']
+    return {
+        'status': 'LOC',
+        'airport': end['airport_ident'],
+        'runway': end['runway_ident'],
+        'runway_elevation_ft': end.get('elevation_ft'),
+        'distance_km': best['metrics']['threshold_dist_km'],
+        'lateral_km': best['metrics']['lateral_km'],
+        'track_delta_deg': best['metrics']['track_delta_deg'],
+    }
+
+def record_positive_vs_update(entry, vs_value):
+    try:
+        vs_float = float(vs_value or 0.0)
+    except (TypeError, ValueError):
+        entry['positive_vs_updates'] = 0
+        return
+    entry['positive_vs_updates'] = int(entry.get('positive_vs_updates', 0) or 0) + 1 if vs_float > 0.0 else 0
+
+def should_release_grounded(entry, data):
+    speed = data.get('speed') if data.get('speed') is not None else entry.get('speed')
+    vs = data.get('vs') if data.get('vs') is not None else entry.get('vs')
+    try:
+        speed = float(speed)
+        vs = float(vs or 0.0)
+    except (TypeError, ValueError):
+        return False
+    touchdown_speed = entry.get('grounded_reference_speed_kts')
+    try:
+        touchdown_speed = float(touchdown_speed)
+    except (TypeError, ValueError):
+        touchdown_speed = float(entry.get('speed') or 0.0)
+    release_speed = max(LANDED_RELEASE_MIN_SPEED_KTS, touchdown_speed + LANDED_RELEASE_SPEED_DELTA_KTS)
+    released_by_motion = speed >= release_speed or (speed >= 45.0 and vs >= 500.0)
+    if not released_by_motion:
+        return False
+    if entry.get('grounded_from_loc') and int(entry.get('positive_vs_updates', 0) or 0) < LOC_RELEASE_POSITIVE_VS_UPDATES:
+        return False
+    return True
+
+def update_grounded_and_approach_state(entry, now):
+    if entry.get('grounded'):
+        entry['approach_status'] = None
+        return
+    loc = detect_localizer_approach(entry, now)
+    entry['approach_status'] = loc['status'] if loc else None
+    if loc:
+        entry['approach_details'] = loc
+    else:
+        entry.pop('approach_details', None)
+    lat, lon, alt = entry.get('lat'), entry.get('lon'), entry.get('altitude')
+    if None in [lat, lon, alt]:
+        return
+    try:
+        if float(alt) < LOWEST_PLAUSIBLE_AIRCRAFT_ALT_FT:
+            entry['grounded'] = True
+            entry['grounded_since'] = now
+            entry['grounded_reference_speed_kts'] = max(float(entry.get('speed') or 0.0), 1.0)
+            entry['grounded_from_loc'] = bool(entry.get('approach_status') == 'LOC' or entry.get('approach_details'))
+            entry['approach_status'] = None
+            return
+        if not loc and float(alt) < USER_ALT_FT:
+            entry['grounded'] = True
+            entry['grounded_since'] = now
+            entry['grounded_reference_speed_kts'] = max(float(entry.get('speed') or 0.0), 1.0)
+            entry['grounded_from_loc'] = False
+            entry['approach_status'] = None
+            return
+    except (TypeError, ValueError):
+        pass
+    match = nearest_runway_threshold_match(lat, lon, alt)
+    if match:
+        entry['grounded'] = True
+        entry['grounded_since'] = now
+        entry['grounded_airport'] = match['end']['airport_ident']
+        entry['grounded_runway'] = match['end']['runway_ident']
+        entry['grounded_reference_speed_kts'] = max(float(entry.get('speed') or 0.0), 1.0)
+        entry['grounded_from_loc'] = bool(entry.get('approach_status') == 'LOC' or entry.get('approach_details'))
+        entry['positive_vs_updates'] = 0
+        entry['approach_status'] = None
+        return
+    if loc and loc.get('runway_elevation_ft') is not None:
+        try:
+            if float(alt) <= float(loc['runway_elevation_ft']) + LANDED_ELEVATION_MARGIN_FT:
+                entry['grounded'] = True
+                entry['grounded_since'] = now
+                entry['grounded_airport'] = loc.get('airport')
+                entry['grounded_runway'] = loc.get('runway')
+                entry['grounded_reference_speed_kts'] = max(float(entry.get('speed') or 0.0), 1.0)
+                entry['grounded_from_loc'] = True
+                entry['positive_vs_updates'] = 0
+                entry['approach_status'] = None
+                return
+        except (TypeError, ValueError):
+            pass
+    try:
+        speed = float(entry.get('speed') or 0.0)
+        alt_f = float(alt)
+    except (TypeError, ValueError):
+        return
+    if speed <= LIKELY_LANDED_MAX_SPEED_KTS and alt_f < -1000.0 and is_probably_landed_aircraft(entry, now):
+        entry['grounded'] = True
+        entry['grounded_since'] = now
+        entry['grounded_reference_speed_kts'] = max(speed, 1.0)
+        entry['grounded_from_loc'] = bool(entry.get('approach_status') == 'LOC' or entry.get('approach_details'))
+        entry['positive_vs_updates'] = 0
+        entry['approach_status'] = None
+
 def update_aircraft(data):
+    tracked_fields = ('callsign', 'altitude', 'speed', 'track', 'lat', 'lon', 'vs', 'squawk')
     with lock:
         icao,now,lat,lon,alt=data['icao'],data['timestamp'],data.get('lat'),data.get('lon'),data.get('altitude')
+        speed,track,vs=data.get('speed'),data.get('track'),data.get('vs')
         if icao in aircraft_dict:
             entry=aircraft_dict[icao]
             ev_ids=entry.get('event_ids',set())
-            for k,v in data.items():
-                if v is not None:entry[k]=v
-                elif k not in entry:entry[k]=None
+            field_times=entry.setdefault('field_timestamps',{})
+            changed_fields=set()
+            if data.get('vs') is not None:
+                record_positive_vs_update(entry, data.get('vs'))
+            if entry.get('grounded') and should_release_grounded(entry, data):
+                entry['grounded'] = False
+                entry.pop('grounded_since', None)
+                entry.pop('grounded_airport', None)
+                entry.pop('grounded_runway', None)
+                entry.pop('grounded_reference_speed_kts', None)
+                entry.pop('grounded_from_loc', None)
+                entry.pop('positive_vs_updates', None)
+            protected_grounded = bool(entry.get('grounded'))
+            for k in ('msg_type', 'icao'):
+                if data.get(k) is not None:
+                    entry[k]=data[k]
+            for k in tracked_fields:
+                if protected_grounded and k in {'altitude', 'lat', 'lon'}:
+                    continue
+                v=data.get(k)
+                if v is None:
+                    if k not in entry:
+                        entry[k]=None
+                    continue
+                if entry.get(k) != v:
+                    entry[k]=v
+                    field_times[k]=now
+                    changed_fields.add(k)
+            if 'lat' in changed_fields or 'lon' in changed_fields:
+                field_times['position']=now
             entry['timestamp'],entry['event_ids']=now,ev_ids
-            if lat is not None and lon is not None and alt is not None:
-                if'history'not in entry:entry['history']=collections.deque(maxlen=min(max(int(AIRCRAFT_HISTORY_MINUTES*60/PREDICTION_INTERVAL)+5,50),MAX_HISTORY_POINTS_PER_AC))
-                entry['history'].append((now,lat,lon,alt))
+            if ('lat' in changed_fields or 'lon' in changed_fields) and entry.get('lat') is not None and entry.get('lon') is not None and entry.get('altitude') is not None:
+                if'history'not in entry:entry['history']=collections.deque(maxlen=aircraft_history_maxlen())
+                elif getattr(entry['history'], 'maxlen', None) != aircraft_history_maxlen():entry['history']=collections.deque(entry['history'], maxlen=aircraft_history_maxlen())
+                entry['history'].append((now,entry.get('lat'),entry.get('lon'),entry.get('altitude')))
+            if changed_fields.intersection({'speed','track','vs'}) and entry.get('speed') is not None and entry.get('track') is not None and entry.get('vs') is not None:
+                if'telemetry_history'not in entry:entry['telemetry_history']=collections.deque(maxlen=MAX_TELEMETRY_HISTORY_POINTS_PER_AC)
+                entry['telemetry_history'].append((now,entry.get('speed'),entry.get('track'),entry.get('vs')))
+            update_grounded_and_approach_state(entry, now)
         else:
-            base={k:None for k in csv_headers if k!='timestamp'};base.update(data);base['timestamp'],base['event_ids']=now,set()
-            base['history']=collections.deque(maxlen=min(max(int(AIRCRAFT_HISTORY_MINUTES*60/PREDICTION_INTERVAL)+5,50),MAX_HISTORY_POINTS_PER_AC))
+            base={k:None for k in csv_headers if k!='timestamp'};base.update(data);base['timestamp'],base['event_ids']=now,set();base['grounded']=False;base['approach_status']=None;base['positive_vs_updates']=0
+            if vs is not None:
+                record_positive_vs_update(base, vs)
+            base['field_timestamps']={k:now for k in tracked_fields if base.get(k) is not None}
+            if base.get('lat') is not None or base.get('lon') is not None:
+                base['field_timestamps']['position']=now
+            base['history']=collections.deque(maxlen=aircraft_history_maxlen())
             if lat is not None and lon is not None and alt is not None:base['history'].append((now,lat,lon,alt))
+            base['telemetry_history']=collections.deque(maxlen=MAX_TELEMETRY_HISTORY_POINTS_PER_AC)
+            if speed is not None and track is not None and vs is not None:base['telemetry_history'].append((now,speed,track,vs))
+            update_grounded_and_approach_state(base, now)
             aircraft_dict[icao]=base
 def get_active_aircraft():
     """
@@ -682,6 +1316,79 @@ def get_active_aircraft():
     
     active.sort(key=lambda x: x['icao'])
     return active
+def is_probably_landed_aircraft(ac_data, now=None):
+    """
+    Conservative event-prediction gate for stale airborne positions after landing.
+    The target stays visible on the map; only low-speed targets close to airport
+    pavement are suppressed from transit prediction.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if ac_data.get('grounded'):
+        return True
+    lat, lon = ac_data.get('lat'), ac_data.get('lon')
+    alt, speed, vs = ac_data.get('altitude'), ac_data.get('speed'), ac_data.get('vs')
+    if None in [lat, lon, alt, speed]:
+        return False
+    try:
+        lat, lon, alt, speed = float(lat), float(lon), float(alt), float(speed)
+        vs = float(vs or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if alt < LOWEST_PLAUSIBLE_AIRCRAFT_ALT_FT:
+        return True
+    if ac_data.get('approach_status') != 'LOC' and not ac_data.get('approach_details') and alt < USER_ALT_FT:
+        return True
+    landed_alt_ceiling = max(LIKELY_LANDED_ALT_FT, USER_ALT_FT + 1200.0)
+    if speed > LIKELY_LANDED_MAX_SPEED_KTS or abs(vs) > LIKELY_LANDED_MAX_VS_FPM or alt > landed_alt_ceiling:
+        return False
+
+    recent = []
+    for item in list(ac_data.get('telemetry_history', [])):
+        try:
+            t_item, spd_item, _trk_item, vs_item = item
+        except (TypeError, ValueError):
+            continue
+        if (now - t_item).total_seconds() <= 14.0 and spd_item is not None:
+            recent.append((float(spd_item), float(vs_item or 0.0)))
+    if len(recent) >= 2 and not all(spd <= LIKELY_LANDED_RECENT_SPEED_KTS and abs(vs_i) <= 256.0 for spd, vs_i in recent):
+        return False
+
+    field_times = ac_data.get('field_timestamps') or {}
+    pos_update = field_times.get('position') or field_times.get('lat') or field_times.get('lon') or ac_data.get('timestamp')
+    alt_update = field_times.get('altitude') or ac_data.get('timestamp')
+    pos_age = (now - pos_update).total_seconds() if isinstance(pos_update, datetime) else 0.0
+    alt_age = (now - alt_update).total_seconds() if isinstance(alt_update, datetime) else 0.0
+    stale_low_speed = speed <= LIKELY_LANDED_MAX_SPEED_KTS and max(pos_age, alt_age) >= 8.0
+
+    nearest_airport_km = None
+    nearest_runway_km = None
+    for airport in airports_data:
+        if airport.get('type') == 'heliport':
+            continue
+        try:
+            dist = haversine(lat, lon, airport['lat'], airport['lon'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if nearest_airport_km is None or dist < nearest_airport_km:
+            nearest_airport_km = dist
+        if dist > LIKELY_LANDED_AIRPORT_KM:
+            continue
+        for runway in runways_data.get(airport.get('ident'), []):
+            try:
+                runway_dist = point_to_segment_distance_km(
+                    lat, lon,
+                    runway['le_lat'], runway['le_lon'],
+                    runway['he_lat'], runway['he_lon'],
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            nearest_runway_km = runway_dist if nearest_runway_km is None else min(nearest_runway_km, runway_dist)
+            if runway_dist <= LIKELY_LANDED_RUNWAY_KM:
+                return True
+    if stale_low_speed and nearest_runway_km is not None and nearest_runway_km <= LIKELY_LANDED_RUNWAY_KM * 1.8:
+        return True
+    return nearest_airport_km is not None and nearest_airport_km <= 2.5 and speed <= 18.0 and alt <= max(1500.0, USER_ALT_FT + 800.0)
 def clean_expired_events():
     global history_event_count
     while running:
@@ -747,9 +1454,13 @@ def predict_conflicts():
     SIMULATION_RADIUS_KM = 300.0 
 
     while running:
-        active_ac = get_active_aircraft()
-        n_active = len(active_ac)
+        if EVENT_PREDICTION_PAUSED:
+            time.sleep(0.1)
+            continue
         now = datetime.now(timezone.utc)
+        active_ac = [ac for ac in get_active_aircraft() if not is_probably_landed_aircraft(ac, now)]
+        n_active = len(active_ac)
+        min_event_el = float(EVENT_MIN_ELEVATION_DEG or 0.0)
         
         earth_obj = None
         user_obs = None
@@ -758,8 +1469,13 @@ def predict_conflicts():
             user_obs = earth_obj + observer_topos
 
         for i in range(n_active):
+            if EVENT_PREDICTION_PAUSED:
+                break
             for j in range(i + 1, n_active):
+                if EVENT_PREDICTION_PAUSED:
+                    break
                 ac1, ac2 = active_ac[i], active_ac[j]
+                ac1_pred, ac2_pred = prediction_aircraft_state(ac1, now), prediction_aircraft_state(ac2, now)
                 
                 # 1. Basic position sanity check
                 ac1_lat, ac1_lon = ac1.get('lat'), ac1.get('lon')
@@ -781,9 +1497,11 @@ def predict_conflicts():
                 conflict_found = False
                 
                 for dt in np.arange(0, PREDICTION_HORIZON + PREDICTION_STEP, PREDICTION_STEP):
+                    if EVENT_PREDICTION_PAUSED:
+                        break
                     # Coarse prediction (broad phase search)
-                    p1 = predict_position(ac1['lat'], ac1['lon'], alt1, ac1['speed'], ac1['track'], dt, ac1['vs'])
-                    p2 = predict_position(ac2['lat'], ac2['lon'], alt2, ac2['speed'], ac2['track'], dt, ac2['vs'])
+                    p1 = predict_position(ac1_pred['lat'], ac1_pred['lon'], alt1, ac1_pred['speed'], ac1_pred['track'], dt, ac1_pred['vs'])
+                    p2 = predict_position(ac2_pred['lat'], ac2_pred['lon'], alt2, ac2_pred['speed'], ac2_pred['track'], dt, ac2_pred['vs'])
                     
                     if p1[0] is None or p2[0] is None: continue
                     
@@ -791,11 +1509,11 @@ def predict_conflicts():
                     ang = angle_between(USER_LAT, USER_LON, USER_ALT_FT, p1[0], p1[1], p1[2], p2[0], p2[1], p2[2])
                     
                     if ang <= CONFLICT_ANGLE_DEG:
-                        precise_t, min_dist = solve_closest_approach(ac1, ac2, dt, window=PREDICTION_STEP * 1.5)
+                        precise_t, min_dist = solve_closest_approach(ac1_pred, ac2_pred, dt, window=PREDICTION_STEP * 1.5)
                         
                         # --- Precision Refinement (Narrow Phase) ---
-                        p1_f = predict_position(ac1['lat'], ac1['lon'], ac1['altitude'], ac1['speed'], ac1['track'], precise_t, ac1['vs'])
-                        p2_f = predict_position(ac2['lat'], ac2['lon'], ac2['altitude'], ac2['speed'], ac2['track'], precise_t, ac2['vs'])
+                        p1_f = predict_position(ac1_pred['lat'], ac1_pred['lon'], ac1_pred['altitude'], ac1_pred['speed'], ac1_pred['track'], precise_t, ac1_pred['vs'])
+                        p2_f = predict_position(ac2_pred['lat'], ac2_pred['lon'], ac2_pred['altitude'], ac2_pred['speed'], ac2_pred['track'], precise_t, ac2_pred['vs'])
                         
                         if p1_f[0] is None or p2_f[0] is None: break
                         event_lat = (p1_f[0] + p2_f[0]) / 2.0
@@ -808,6 +1526,10 @@ def predict_conflicts():
                         precise_angle = angle_between(USER_LAT, USER_LON, USER_ALT_FT, 
                                                       p1_f[0], p1_f[1], p1_f[2], 
                                                       p2_f[0], p2_f[1], p2_f[2])
+                        approx_az1, approx_el1 = aircraft_azel_approx(p1_f[0], p1_f[1], p1_f[2])
+                        approx_az2, approx_el2 = aircraft_azel_approx(p2_f[0], p2_f[1], p2_f[2])
+                        if approx_el1 is None or approx_el2 is None or min(approx_el1, approx_el2) < min_event_el:
+                            continue
 
                         pov_data = {'valid': False}
                         if user_obs and earth_obj:
@@ -815,8 +1537,8 @@ def predict_conflicts():
                                 t_cpa = ts.utc(now + timedelta(seconds=precise_t))
                                 dt_vec = 2.0
                                 t_vec = ts.utc(now + timedelta(seconds=precise_t + dt_vec))
-                                p1_v = predict_position(ac1['lat'], ac1['lon'], ac1['altitude'], ac1['speed'], ac1['track'], precise_t + dt_vec, ac1['vs'])
-                                p2_v = predict_position(ac2['lat'], ac2['lon'], ac2['altitude'], ac2['speed'], ac2['track'], precise_t + dt_vec, ac2['vs'])
+                                p1_v = predict_position(ac1_pred['lat'], ac1_pred['lon'], ac1_pred['altitude'], ac1_pred['speed'], ac1_pred['track'], precise_t + dt_vec, ac1_pred['vs'])
+                                p2_v = predict_position(ac2_pred['lat'], ac2_pred['lon'], ac2_pred['altitude'], ac2_pred['speed'], ac2_pred['track'], precise_t + dt_vec, ac2_pred['vs'])
 
                                 def get_azel(geo_pos, time_obj):
                                     if geo_pos[0] is None: return 0, 0
@@ -937,8 +1659,8 @@ def predict_celestial_conflicts():
             except:
                 return 999.0
 
-        # First bracket the local minimum with a dense local scan, then refine that bracket.
-        sample_count = 13
+        # First bracket the local minimum with a local scan, then refine that bracket.
+        sample_count = 7
         sample_step = (b - a) / (sample_count - 1) if sample_count > 1 else 0.0
         samples = []
         for idx in range(sample_count):
@@ -958,9 +1680,8 @@ def predict_celestial_conflicts():
         fc = get_sep_at(c)
         fd = get_sep_at(d)
         
-        # 28 iterations keep the mathematical solver far below ADS-B telemetry error.
-        for _ in range(28):
-            if abs(b - a) < 0.001:
+        for _ in range(14):
+            if abs(b - a) < 0.02:
                 break
             if fc < fd:
                 b = d
@@ -981,56 +1702,74 @@ def predict_celestial_conflicts():
         return min(candidates, key=lambda item: item[1])
 
     while running:
-        active_ac = get_active_aircraft()
+        if EVENT_PREDICTION_PAUSED:
+            time.sleep(0.1)
+            continue
         now = datetime.now(timezone.utc)
-        
+        active_ac = [ac for ac in get_active_aircraft() if not is_probably_landed_aircraft(ac, now)]
+        min_event_el = float(EVENT_MIN_ELEVATION_DEG or 0.0)
+        if not active_ac:
+            time.sleep(PREDICTION_INTERVAL)
+            continue
+
         # Define observer location (Topocentric)
         user_observer = earth_obj + observer_topos
+        celestial_step = max(3.0, min(8.0, PREDICTION_STEP * 6.0))
+        dt_values = [float(dt) for dt in np.arange(0, PREDICTION_HORIZON + 0.001, celestial_step)]
+        if not dt_values or abs(dt_values[-1] - PREDICTION_HORIZON) > 0.01:
+            dt_values.append(float(PREDICTION_HORIZON))
+        body_samples = {}
+        for dt in dt_values:
+            try:
+                t_sky = ts.utc(now + timedelta(seconds=dt))
+                sun_app = user_observer.at(t_sky).observe(sun_obj).apparent()
+                moon_app = user_observer.at(t_sky).observe(moon_obj).apparent()
+                s_alt, s_az, _ = sun_app.altaz()
+                m_alt, m_az, _ = moon_app.altaz()
+                body_samples[dt] = {
+                    'sun': {'az': s_az.degrees, 'el': s_alt.degrees, 'dia': apparent_angular_diameter_deg(sun_app, 'sun')},
+                    'moon': {'az': m_az.degrees, 'el': m_alt.degrees, 'dia': apparent_angular_diameter_deg(moon_app, 'moon')},
+                }
+            except Exception:
+                body_samples[dt] = {}
 
         for ac in active_ac:
+            if EVENT_PREDICTION_PAUSED:
+                break
+            ac = prediction_aircraft_state(ac, now)
             icao = ac['icao']
             csign = ac.get('callsign') or icao
             
             # Fetch aircraft state and telemetry
             lat, lon, alt, spd, trk, vs = (ac.get(k) for k in ('lat', 'lon', 'altitude', 'speed', 'track', 'vs'))
             if None in [lat, lon, alt, spd, trk, vs]: continue
+            if haversine(USER_LAT, USER_LON, lat, lon) > max(CONFLICT_RADIUS_KM * 2.0, 180.0):
+                continue
 
             # Coarse Search
-            for dt in np.arange(0, PREDICTION_HORIZON + PREDICTION_STEP, PREDICTION_STEP):
-                # 1. Coarse prediction (Broad-phase search)
+            for dt in dt_values:
+                if EVENT_PREDICTION_PAUSED:
+                    break
+                sample = body_samples.get(dt, {})
                 pl, pn, pa = predict_position(lat, lon, alt, spd, trk, dt, vs)
                 if pl is None: continue
 
-                try:
-                    ac_pos_wgs84 = wgs84.latlon(pl, pn, elevation_m=feet_to_km(pa)*1000.0)
-                except: continue
-
-                t_sky = ts.utc(now + timedelta(seconds=dt))
-                
-                # 2. Calculate aircraft apparent position
-                ac_astrometric = user_observer.at(t_sky).observe(earth_obj + ac_pos_wgs84)
-                ac_apparent = ac_astrometric.apparent()
-                
-                # [Filter 1] Aircraft altitude check: skip if the aircraft is below the horizon
-                ac_alt_obj, ac_az_obj, _ = ac_apparent.altaz()
-                if ac_alt_obj.degrees < 0: 
+                ac_az, ac_el = aircraft_azel_approx(pl, pn, pa)
+                if ac_az is None or ac_el is None or ac_el < min_event_el:
                     continue
 
                 conflict_found_this_step = False
 
                 # --- Check Sun Proximity ---
                 try:
-                    sun_astrometric = user_observer.at(t_sky).observe(sun_obj)
-                    sun_apparent = sun_astrometric.apparent()
-                    s_alt_obj, _, _ = sun_apparent.altaz()
-                    if s_alt_obj.degrees < 0:
+                    sun_sample = sample.get('sun')
+                    if not sun_sample or sun_sample['el'] < min_event_el:
                         pass # [Filter 2] Sun altitude check: skip if Sun is below the horizon
                     else:
-                        # 粗略角度
-                        ang_s_coarse = sun_apparent.separation_from(ac_apparent).degrees
-
-                        sun_capture_threshold = SUN_ANGULAR_DIAMETER_DEG / 2.0
-                        sun_refine_threshold = max(CONFLICT_ANGLE_DEG, sun_capture_threshold + 0.75)
+                        ang_s_coarse = angular_separation_azel(ac_az, ac_el, sun_sample['az'], sun_sample['el'])
+                        sun_dia_deg = sun_sample['dia']
+                        sun_capture_threshold = sun_dia_deg / 2.0
+                        sun_refine_threshold = max(CONFLICT_ANGLE_DEG, sun_capture_threshold + 1.25)
                         if ang_s_coarse <= sun_refine_threshold:
                             # [Refinement] Initiate golden section search for sub-second precision
                             precise_t, precise_ang = minimize_separation(ac, sun_obj, dt, now)
@@ -1051,7 +1790,10 @@ def predict_celestial_conflicts():
                                 
                                 alt_f, az_f, _ = ac_app_f.altaz()
                                 s_alt_f, s_az_f, _ = sun_app_f.altaz()
-                                
+                                if alt_f.degrees < min_event_el or s_alt_f.degrees < min_event_el:
+                                    continue
+                                transit_slice_f = calculate_transit_ground_slice(pl_f, pn_f, pa_f, 'sun', pt_final, sun_app_f)
+
                                 # Calculate velocity vector (sampled 1 second later)
                                 dt_vec = 1.0
                                 pl_v, pn_v, pa_v = predict_position(lat, lon, alt, spd, trk, precise_t + dt_vec, vs)
@@ -1072,9 +1814,11 @@ def predict_celestial_conflicts():
                                     'angle': precise_ang, 
                                     'last_update': now,
                                     'lat': pl_f, 'lon': pn_f, 'alt': pa_f,
+                                    'transit_slice': transit_slice_f,
                                     'pov': {
                                         'valid': True,
                                         'body_type': 'Sun',
+                                        'body_angular_diameter_deg': sun_dia_deg,
                                         'body_az': s_az_f.degrees,
                                         'body_el': s_alt_f.degrees,
                                         'ac_az': az_f.degrees,
@@ -1099,18 +1843,14 @@ def predict_celestial_conflicts():
 
                 # --- Check Moon Proximity ---
                 try:
-                    moon_astrometric = user_observer.at(t_sky).observe(moon_obj)
-                    moon_apparent = moon_astrometric.apparent()
-                    
-                    # [Filter 2] Moon altitude check
-                    m_alt_obj, _, _ = moon_apparent.altaz()
-                    if m_alt_obj.degrees < 0:
+                    moon_sample = sample.get('moon')
+                    if not moon_sample or moon_sample['el'] < min_event_el:
                         pass
                     else:
-                        ang_m_coarse = moon_apparent.separation_from(ac_apparent).degrees
-
-                        moon_capture_threshold = MOON_ANGULAR_DIAMETER_DEG / 2.0
-                        moon_refine_threshold = max(CONFLICT_ANGLE_DEG, moon_capture_threshold + 0.75)
+                        ang_m_coarse = angular_separation_azel(ac_az, ac_el, moon_sample['az'], moon_sample['el'])
+                        moon_dia_deg = moon_sample['dia']
+                        moon_capture_threshold = moon_dia_deg / 2.0
+                        moon_refine_threshold = max(CONFLICT_ANGLE_DEG, moon_capture_threshold + 1.25)
                         if ang_m_coarse <= moon_refine_threshold:
                             precise_t, precise_ang = minimize_separation(ac, moon_obj, dt, now)
 
@@ -1126,6 +1866,9 @@ def predict_celestial_conflicts():
                                 
                                 alt_f, az_f, _ = ac_app_f.altaz()
                                 m_alt_f, m_az_f, _ = moon_app_f.altaz()
+                                if alt_f.degrees < min_event_el or m_alt_f.degrees < min_event_el:
+                                    continue
+                                transit_slice_f = calculate_transit_ground_slice(pl_f, pn_f, pa_f, 'moon', pt_final, moon_app_f)
 
                                 dt_vec = 1.0
                                 pl_v, pn_v, pa_v = predict_position(lat, lon, alt, spd, trk, precise_t + dt_vec, vs)
@@ -1146,9 +1889,11 @@ def predict_celestial_conflicts():
                                     'angle': precise_ang, 
                                     'last_update': now,
                                     'lat': pl_f, 'lon': pn_f, 'alt': pa_f,
+                                    'transit_slice': transit_slice_f,
                                     'pov': {
                                         'valid': True,
                                         'body_type': 'Moon', 
+                                        'body_angular_diameter_deg': moon_dia_deg,
                                         'body_az': m_az_f.degrees,
                                         'body_el': m_alt_f.degrees,
                                         'ac_az': az_f.degrees,
@@ -1212,7 +1957,7 @@ def start_listener():
             with socket.socket(socket.AF_INET,socket.SOCK_STREAM)as s:
                 s.settimeout(10.0);s.connect((HOST,PORT));print("[*] Connected to dump1090.")
                 with lock:DUMP1090_CONNECTED=True
-                s.settimeout(None);buffer=''
+                s.settimeout(5.0);buffer='';last_message_time=time.monotonic()
                 while running:
                     try:
                         data=s.recv(4096)
@@ -1222,8 +1967,14 @@ def start_listener():
                             line,buffer=buffer.split('\n',1)
                             if not line.strip():continue
                             parsed=parse_basestation_line(line)
-                            if parsed:update_aircraft(parsed)
-                    except socket.timeout:print("[!] Socket read timeout (unexpected).");break
+                            if parsed:
+                                last_message_time=time.monotonic()
+                                update_aircraft(parsed)
+                    except socket.timeout:
+                        if time.monotonic()-last_message_time>=LISTENER_IDLE_RECONNECT_SEC:
+                            print(f"[!] No SBS messages for {LISTENER_IDLE_RECONNECT_SEC:.0f}s; reconnecting to dump1090.")
+                            break
+                        continue
                     except OSError as e:print(f"[!] Socket error: {e}");break
                     except Exception as e:print(f"[!] Error processing data: {e}");traceback.print_exc();continue
         except socket.timeout:print(f"[*] Connection attempt timed out. Retrying...")
@@ -1275,7 +2026,7 @@ class ConfigDialog(tk.Toplevel): # Structurally unchanged
     def _create_predict_widgets(self,cfg):
         f,r=self.frame_predict,0
         def add(l,k,d,w=8):nonlocal r;tk.Label(f,text=l).grid(row=r,column=0,sticky="w",padx=5,pady=2);e=tk.Entry(f,width=w);e.grid(row=r,column=1,sticky="w",padx=5,pady=2);e.insert(0,str(cfg.get(k,d)));self.entries[k]=e;r+=1
-        add("Aircraft Timeout (s):","aircraft_timeout",DEFAULT_AIRCRAFT_TIMEOUT_SEC);add("Prediction Interval (s):","pred_interval",DEFAULT_PREDICTION_INTERVAL_SEC);add("Prediction Horizon (s):","pred_horizon",DEFAULT_PREDICTION_HORIZON_SEC);add("Prediction Step (s):","pred_step",DEFAULT_PREDICTION_STEP_SEC);add("Conflict Angle (°):","conflict_angle",DEFAULT_CONFLICT_ANGLE_DEG);add("Event Timeout (s):","event_timeout",cfg.get("event_timeout",EVENT_TIMEOUT));add("Conflict Radius (km):","conflict_radius_km",cfg.get("conflict_radius_km",CONFLICT_RADIUS_KM));f.columnconfigure(1,weight=1)
+        add("Aircraft Timeout (s):","aircraft_timeout",DEFAULT_AIRCRAFT_TIMEOUT_SEC);add("Prediction Interval (s):","pred_interval",DEFAULT_PREDICTION_INTERVAL_SEC);add("Prediction Horizon (s):","pred_horizon",DEFAULT_PREDICTION_HORIZON_SEC);add("Prediction Step (s):","pred_step",DEFAULT_PREDICTION_STEP_SEC);add("Prediction Average (s):","prediction_average_sec",DEFAULT_PREDICTION_AVERAGE_SEC);add("Conflict Angle (°):","conflict_angle",DEFAULT_CONFLICT_ANGLE_DEG);add("Event Timeout (s):","event_timeout",cfg.get("event_timeout",EVENT_TIMEOUT));add("Conflict Radius (km):","conflict_radius_km",cfg.get("conflict_radius_km",CONFLICT_RADIUS_KM));f.columnconfigure(1,weight=1)
     def _create_display_widgets(self,cfg):
         f,dro=self.frame_display,0;gf=ttk.LabelFrame(f,text="General Map Display",padding="5");gf.grid(row=dro,column=0,columnspan=2,sticky="ew",pady=5);cr=0
         tk.Label(gf,text="Aircraft History (min):").grid(row=cr,column=0,sticky="w",padx=5,pady=2);ehm=tk.Entry(gf,width=8);ehm.grid(row=cr,column=1,sticky="w",padx=5,pady=2);ehm.insert(0,str(cfg.get("history_minutes",DEFAULT_AIRCRAFT_HISTORY_MINUTES)));self.entries["history_minutes"]=ehm;cr+=1
@@ -1587,7 +2338,7 @@ def draw_pov_schematic(surface, event_data, screen_x, screen_y):
         return px, py
     if ev_type in ['AC-Sun', 'AC-Moon']:
         body_px, body_py = project(pov['body_az'], pov['body_el'])
-        body_radius_deg = (SUN_ANGULAR_DIAMETER_DEG if ev_type == 'AC-Sun' else MOON_ANGULAR_DIAMETER_DEG) / 2.0
+        body_radius_deg = float(pov.get('body_angular_diameter_deg', SUN_ANGULAR_DIAMETER_DEG if ev_type == 'AC-Sun' else MOON_ANGULAR_DIAMETER_DEG)) / 2.0
         body_radius_px = body_radius_deg * scale
         b_color = (255, 255, 100) if ev_type == 'AC-Sun' else (200, 200, 200)
         pygame.draw.circle(s, b_color, (int(body_px), int(body_py)), int(body_radius_px))
@@ -1706,12 +2457,26 @@ class MapDataManager:
         return os.path.join(self.cache_dir, f"{layer_key}.pkl")
     def load_layer(self, layer_key, config):
         """Load from cache or fallback to Shapefile parsing and cache generation."""
-        cache_path = self.get_cache_path(layer_key)
+        source_layer = config.get("source_layer")
+        if source_layer in self.layers_data:
+            self.layers_data[layer_key] = self.layers_data[source_layer]
+            return True
+        cache_key = config.get("cache_key", layer_key)
+        if cache_key in self.layers_data:
+            self.layers_data[layer_key] = self.layers_data[cache_key]
+            return True
+        for existing_key, existing_config in VECTOR_LAYER_CONFIGS.items():
+            if existing_key in self.layers_data and existing_config.get("cache_key", existing_key) == cache_key:
+                self.layers_data[layer_key] = self.layers_data[existing_key]
+                self.layers_data[cache_key] = self.layers_data[existing_key]
+                return True
+        cache_path = self.get_cache_path(cache_key)
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, 'rb') as f:
                     print(f"Loading {layer_key} from fast cache...")
                     self.layers_data[layer_key] = pickle.load(f)
+                    self.layers_data[cache_key] = self.layers_data[layer_key]
                     return True
             except Exception as e:
                 print(f"Cache load failed for {layer_key}, rebuilding... ({e})")
@@ -1729,7 +2494,7 @@ class MapDataManager:
         """Read the raw Shapefile and convert it to a NumPy-optimized format"""
         processed_features = []
         base_vector_path = resource_path(os.path.join("data", "map_vectors"))
-        layer_dir_path = os.path.join(base_vector_path, layer_key)
+        layer_dir_path = os.path.join(base_vector_path, config.get("source_layer", layer_key))
         shapefile_name = config.get("shp_filename", layer_key)
         shapefile_path = os.path.join(layer_dir_path, shapefile_name + ".shp")
 
@@ -1985,7 +2750,7 @@ def show_loading_screen_and_load_data(screen, font, info_font):
 
 
 def visualization_loop(screen, current_screen_width, current_screen_height):
-    global running, current_display_range_km, HOST, PORT, DUMP1090_DEVICE_INDEX, DUMP1090_GAIN, USER_LAT, USER_LON, USER_ALT, USER_ALT_FT, AIRCRAFT_TIMEOUT, PREDICTION_INTERVAL, PREDICTION_HORIZON, PREDICTION_STEP, CONFLICT_ANGLE_DEG, EVENT_TIMEOUT, CONFLICT_RADIUS_KM, AIRCRAFT_HISTORY_MINUTES, SHOW_AIRPORT_TYPES, SHOW_NAVAID_TYPES, SHOW_AIRCRAFT_HISTORY, SHOW_EVENT_LOCATIONS, SHOW_GLIDESLOPE, SHOW_RANGE_RINGS, RANGE_RING_SPACING_NM_STR, RANGE_RING_SPACING_KM, MAX_RANGE_RINGS, observer_topos, eph, ts, config_file_full_path, aircraft_dict, event_dict, history_event_count, DUMP1090_CONNECTED, start_time, lock, dialog_result_storage, dialog_thread, airports_data, runways_data, navaids_data, data_loading_thread, data_load_result, active_glideslopes, dialog_runway_end_result_storage, dialog_runway_end_thread, selected_aircraft_for_transit_icao, SHOW_ALL_TRANSIT_STRIPS, VELOCITY_VECTOR_SECONDS, VELOCITY_VECTOR_MINUTES, SHOW_VELOCITY_VECTOR, VECTOR_LAYERS_VISIBILITY, map_features_geodata, last_clicked_transit_coord, last_clicked_transit_time
+    global running, current_display_range_km, HOST, PORT, DUMP1090_DEVICE_INDEX, DUMP1090_GAIN, USER_LAT, USER_LON, USER_ALT, USER_ALT_FT, TERRAIN_ALT_M, AIRCRAFT_TIMEOUT, PREDICTION_INTERVAL, PREDICTION_HORIZON, PREDICTION_STEP, PREDICTION_AVERAGE_SEC, CONFLICT_ANGLE_DEG, EVENT_TIMEOUT, CONFLICT_RADIUS_KM, AIRCRAFT_HISTORY_MINUTES, SHOW_AIRPORT_TYPES, SHOW_NAVAID_TYPES, SHOW_AIRCRAFT_HISTORY, SHOW_EVENT_LOCATIONS, SHOW_GLIDESLOPE, SHOW_RANGE_RINGS, RANGE_RING_SPACING_NM_STR, RANGE_RING_SPACING_KM, MAX_RANGE_RINGS, observer_topos, eph, ts, config_file_full_path, aircraft_dict, event_dict, history_event_count, DUMP1090_CONNECTED, start_time, lock, dialog_result_storage, dialog_thread, airports_data, runways_data, navaids_data, data_loading_thread, data_load_result, active_glideslopes, dialog_runway_end_result_storage, dialog_runway_end_thread, selected_aircraft_for_transit_icao, SHOW_ALL_TRANSIT_STRIPS, VELOCITY_VECTOR_SECONDS, VELOCITY_VECTOR_MINUTES, SHOW_VELOCITY_VECTOR, VECTOR_LAYERS_VISIBILITY, map_features_geodata, last_clicked_transit_coord, last_clicked_transit_time
 
     # screen_width and screen_height will track the current dimensions of the 'screen' surface.
     # Initialize with the dimensions passed from __main__
@@ -2072,8 +2837,8 @@ def visualization_loop(screen, current_screen_width, current_screen_height):
                 original_airport_filters=SHOW_AIRPORT_TYPES[:]; original_navaid_filters=SHOW_NAVAID_TYPES[:]
                 original_vector_visibility = VECTOR_LAYERS_VISIBILITY.copy()
                 HOST=new_config['host']; PORT=new_config['port']; DUMP1090_DEVICE_INDEX=new_config['device_index']; DUMP1090_GAIN=new_config['gain']
-                USER_LAT=new_config['lat']; USER_LON=new_config['lon']; USER_ALT=new_config['alt_m']; USER_ALT_FT=USER_ALT*3.28084
-                AIRCRAFT_TIMEOUT=new_config['aircraft_timeout']; PREDICTION_INTERVAL=new_config['pred_interval']; PREDICTION_HORIZON=new_config['pred_horizon']; PREDICTION_STEP=new_config['pred_step']; CONFLICT_ANGLE_DEG=new_config['conflict_angle']; EVENT_TIMEOUT=new_config['event_timeout']; CONFLICT_RADIUS_KM=new_config['conflict_radius_km']; AIRCRAFT_HISTORY_MINUTES=new_config['history_minutes']; SHOW_AIRPORT_TYPES=new_config['show_airport_types']; SHOW_NAVAID_TYPES=new_config['show_navaid_types']; SHOW_AIRCRAFT_HISTORY=new_config['show_history']; SHOW_EVENT_LOCATIONS=new_config['show_events']
+                USER_LAT=new_config['lat']; USER_LON=new_config['lon']; USER_ALT=new_config['alt_m']; USER_ALT_FT=USER_ALT*3.28084; TERRAIN_ALT_M=USER_ALT
+                AIRCRAFT_TIMEOUT=new_config['aircraft_timeout']; PREDICTION_INTERVAL=new_config['pred_interval']; PREDICTION_HORIZON=new_config['pred_horizon']; PREDICTION_STEP=new_config['pred_step']; PREDICTION_AVERAGE_SEC=new_config.get('prediction_average_sec', DEFAULT_PREDICTION_AVERAGE_SEC); CONFLICT_ANGLE_DEG=new_config['conflict_angle']; EVENT_TIMEOUT=new_config['event_timeout']; CONFLICT_RADIUS_KM=new_config['conflict_radius_km']; AIRCRAFT_HISTORY_MINUTES=new_config['history_minutes']; SHOW_AIRPORT_TYPES=new_config['show_airport_types']; SHOW_NAVAID_TYPES=new_config['show_navaid_types']; SHOW_AIRCRAFT_HISTORY=new_config['show_history']; SHOW_EVENT_LOCATIONS=new_config['show_events']
                 SHOW_GLIDESLOPE = new_config['show_glideslope']; SHOW_RANGE_RINGS = new_config['show_range_rings']; RANGE_RING_SPACING_NM_STR = new_config['range_ring_spacing_nm_str']; MAX_RANGE_RINGS = new_config['max_range_rings']
                 SHOW_ALL_TRANSIT_STRIPS = new_config['show_all_transit_strips']
                 VELOCITY_VECTOR_MINUTES = new_config['velocity_vector_minutes']; VELOCITY_VECTOR_SECONDS = VELOCITY_VECTOR_MINUTES * 60.0
@@ -2121,7 +2886,7 @@ def visualization_loop(screen, current_screen_width, current_screen_height):
                 mouse_event_handled = False
                 if config_button_rect.collidepoint(event.pos):
                     if not (dialog_thread and dialog_thread.is_alive()):
-                        current_runtime_config={'host':HOST,'port':PORT,'device_index':DUMP1090_DEVICE_INDEX,'gain':DUMP1090_GAIN,'lat':USER_LAT,'lon':USER_LON,'alt_m':USER_ALT,'aircraft_timeout':AIRCRAFT_TIMEOUT,'pred_interval':PREDICTION_INTERVAL,'pred_horizon':PREDICTION_HORIZON,'pred_step':PREDICTION_STEP,'conflict_angle':CONFLICT_ANGLE_DEG,'event_timeout':EVENT_TIMEOUT,'conflict_radius_km':CONFLICT_RADIUS_KM,'history_minutes':AIRCRAFT_HISTORY_MINUTES,'show_airport_types':SHOW_AIRPORT_TYPES[:],'show_navaid_types':SHOW_NAVAID_TYPES[:],'show_history':SHOW_AIRCRAFT_HISTORY,'show_events':SHOW_EVENT_LOCATIONS, 'show_glideslope': SHOW_GLIDESLOPE, 'show_range_rings': SHOW_RANGE_RINGS, 'range_ring_spacing_nm_str': RANGE_RING_SPACING_NM_STR, 'max_range_rings': MAX_RANGE_RINGS, 'show_all_transit_strips': SHOW_ALL_TRANSIT_STRIPS, 'velocity_vector_minutes': VELOCITY_VECTOR_MINUTES, 'show_velocity_vector': SHOW_VELOCITY_VECTOR, 'vector_layers_visibility': VECTOR_LAYERS_VISIBILITY.copy()}
+                        current_runtime_config={'host':HOST,'port':PORT,'device_index':DUMP1090_DEVICE_INDEX,'gain':DUMP1090_GAIN,'lat':USER_LAT,'lon':USER_LON,'alt_m':USER_ALT,'aircraft_timeout':AIRCRAFT_TIMEOUT,'pred_interval':PREDICTION_INTERVAL,'pred_horizon':PREDICTION_HORIZON,'pred_step':PREDICTION_STEP,'prediction_average_sec':PREDICTION_AVERAGE_SEC,'conflict_angle':CONFLICT_ANGLE_DEG,'event_timeout':EVENT_TIMEOUT,'conflict_radius_km':CONFLICT_RADIUS_KM,'history_minutes':AIRCRAFT_HISTORY_MINUTES,'show_airport_types':SHOW_AIRPORT_TYPES[:],'show_navaid_types':SHOW_NAVAID_TYPES[:],'show_history':SHOW_AIRCRAFT_HISTORY,'show_events':SHOW_EVENT_LOCATIONS, 'show_glideslope': SHOW_GLIDESLOPE, 'show_range_rings': SHOW_RANGE_RINGS, 'range_ring_spacing_nm_str': RANGE_RING_SPACING_NM_STR, 'max_range_rings': MAX_RANGE_RINGS, 'show_all_transit_strips': SHOW_ALL_TRANSIT_STRIPS, 'velocity_vector_minutes': VELOCITY_VECTOR_MINUTES, 'show_velocity_vector': SHOW_VELOCITY_VECTOR, 'vector_layers_visibility': VECTOR_LAYERS_VISIBILITY.copy()}
                         open_config_dialog_threaded(current_runtime_config)
                     mouse_event_handled = True
                 elif left_rect.collidepoint(event.pos):

@@ -1,5 +1,7 @@
 # ADS-B Transit Predictor
 
+<p align="center"><img src="assets/icon.png" width="96" alt="ADS-B Transit Predictor icon"></p>
+
 A real-time visualization and prediction tool for aircraft transits across the Sun and Moon, plus aircraft-to-aircraft close visual encounters, using live ADS-B data.
 
 ## Motivation
@@ -9,8 +11,9 @@ As an aviation enthusiast and photographer, I was fascinated by two distinct and
 
 | Use case | Recommended package | Interface | Notes |
 |---|---|---|---|
-| Windows desktop app | Older Windows Desktop release | Pygame / Tk desktop UI | Use this if you want the previous `.exe` workflow. |
 | Linux / WSL server | Latest Linux Web Server release | Browser Web UI | Use this for WSL, LAN/Tailscale access, mobile viewing, HTTPS GPS support, and `adsb-web`. |
+| Windows — manage Linux server | Latest Windows Controller release | Tkinter desktop GUI | Installer, controller, and uninstaller for the Linux web server running in WSL. |
+| Windows desktop app (legacy) | Older Windows Desktop release | Pygame / Tk desktop UI | Use this if you want the previous self-contained `.exe` workflow. |
 
 Download packages from the [GitHub Releases page](https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases).
 
@@ -18,34 +21,55 @@ The latest Linux package is intended to be downloaded as:
 
 ```bash
 mkdir -p ~/adsb-transit && cd ~/adsb-transit
-wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web-v1.3.0-20260504.tar.gz"
+wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web.tar.gz"
 tar -xzf ADS-B-Transit-Predictor-linux-web.tar.gz
-cd ADS-B-Transit-Predictor-*
+cd ADS-B-Transit-Predictor-*/
 ./scripts/install_linux.sh
+source scripts/adsb_alias.sh
+adsb-doctor
+adsb-web
 ```
 
 For full Linux/WSL setup, including `usbipd`, Tailscale, HTTPS self-signed certificates, browser GPS, and `adsb-web`, read [README_LINUX_WEB.md](README_LINUX_WEB.md).
+
+For release history, read [CHANGELOG.md](CHANGELOG.md).
+
+## Latest Linux Web Update Highlights
+
+* Switchable 2D/3D perspective map view: tilt the aviation map for a low-angle perspective of aircraft and transit strip overlays.
+* Windows controller for WSL: manage the Linux web server from a Windows-side installer, controller, and uninstaller GUI.
+* High-resolution GSHHG coastline and land-fill map layers.
+* Viewport-aware aircraft and map rendering for wide, tall, mobile, and tablet screens.
+* More stable prediction inputs, optimized event calculation, and smoother map interaction.
 
 ## Key Features
 
 * **Real-time flight tracking:** Reads live SBS/BaseStation ADS-B messages from dump1090 or another compatible decoder.
 * **Sun/Moon transit prediction:** Predicts whether an aircraft will cross the apparent disc of the Sun or Moon from the observer location.
 * **Aircraft-to-aircraft close encounters:** Detects rare visual convergence opportunities between two aircraft.
+* **2D/3D map view:** Toggle between top-down 2D and a tiltable 3D perspective view of aircraft, transit strips, and map layers.
 * **High-precision geometry:** Uses Skyfield, WGS84 geodetic conversions, and refined closest-approach searches.
-* **Geospatial context:** Uses Natural Earth vector data and OurAirports airport, runway, and navaid data.
+* **Geospatial context:** Uses GSHHG/Natural Earth vector data and OurAirports airport, runway, and navaid data.
 * **Linux Web UI:** Provides a browser-based HTTPS interface for LAN, Tailscale, mobile, and tablet access.
-* **Windows desktop release:** Older releases remain available for users who prefer the packaged desktop `.exe`.
+* **Windows controller:** A Windows-side installer, controller, and uninstaller GUI for managing the Linux web server running in WSL.
+* **Windows desktop release (legacy):** Older releases remain available for users who prefer the previous self-contained desktop `.exe`.
 
 ## Linux Web Server Preview
 
-### Mobile/Tailnet Web UI
-![S1 Web UI](assets/Screenshot_5.jpg)
+### S1: 3D Perspective View
+![S1 3D View](assets/Screenshot_5.jpg)
 
-### Live Aviation Map
-![S2 Settings](assets/Screenshot_6.jpg)
+### S2: 3D View — Low Pitch / Wide Area
+![S2 3D Low Pitch](assets/Screenshot_6.jpg)
 
-### Settings And Receiver Configuration
-![S3 Live Map](assets/Screenshot_7.jpg)
+### S3: 3D View — Aircraft Transit
+![S3 3D Transit](assets/Screenshot_7.jpg)
+
+### S4: 3D View — Aircraft Transit
+![S4 3D Close](assets/Screenshot_8.jpg)
+
+### S5: 3D View — Aircraft close encounter
+![S5 3D Tilted](assets/Screenshot_9.jpg)
 
 ### Linux/WSL Network Architecture
 ![Linux Web Architecture](assets/image-2-linux-web-architecture.svg)
@@ -66,7 +90,7 @@ The earlier Windows release uses the original desktop interface. It remains avai
 ### Windows POV Preview
 ![Windows POV Preview](assets/Screenshot_4.png)
 
-## Windows Desktop Demo
+## Demo
 
 ### Examples
 ![Example of a close encounter](assets/eg.jpg)
@@ -77,16 +101,28 @@ The earlier Windows release uses the original desktop interface. It remains avai
 * **Core logic:** Python 3
 * **Astronomy:** Skyfield with JPL DE421 ephemeris
 * **Geodesy:** WGS84 Earth model
-* **Map/vector processing:** NumPy, Shapely, PyShp, Natural Earth
+* **Map/vector processing:** NumPy, Shapely, PyShp, GSHHG, Natural Earth
 * **Aviation data:** OurAirports airports, runways, and navaids
 * **Windows desktop UI:** Pygame and Tkinter
 * **Linux Web UI:** Python HTTP server, HTML Canvas, HTTPS, local vector map rendering
-* **ADS-B decoder:** dump1090 / dump1090-mutability SBS output
+* **ADS-B decoder:** dump1090, dump1090-mutability, readsb, or another SBS/BaseStation-compatible decoder
+
+## Release And Version Policy
+
+This repository keeps one shared Git history for ADS-B Transit Predictor. Windows desktop and Linux web-server packages are release assets built from tagged states of that history; they are not separate repositories.
+
+Older Windows releases remain preserved by their existing tags and GitHub Release pages. Publishing a new Linux web-server release does not delete or overwrite those assets. Users who need the Windows `.exe` should download the older Windows release asset from the Releases page.
+
+Release packages may contain platform-specific README content:
+
+* The repository README is a version-selection entry point.
+* The Linux `.tar.gz` package uses a Linux-focused README with `usbipd`, Tailscale, HTTPS, GPS, and `adsb-web` setup.
+* A future Windows package can include a Windows-focused README for the desktop `.exe` workflow.
 
 
 ## Acknowledgements
 
-* **Data sources:** Natural Earth and OurAirports.
+* **Data sources:** GSHHG, Natural Earth, and OurAirports.
 * **Scientific models:** JPL DE421 ephemeris and WGS84.
 * **ADS-B decoding:** dump1090, originally by Salvatore Sanfilippo, distributed under BSD 3-Clause license.
 

@@ -17,6 +17,7 @@
         ]
     ],
     "aircraft_label_color": "aircraft",
+    "aircraft_refresh_interval": "realtime",
     "ils_length_nm": "10",
     "ils_style": "atc",
     "trajectory_display_mode": "altitude",
@@ -24,7 +25,11 @@
     "unit_altitude": "ft",
     "unit_distance": "km",
     "unit_speed": "kt",
+    "show_active_full_history": false,
+    "show_grounded_aircraft": false,
     "show_event_range_ring": true,
+    "show_event_aircraft_links": true,
     "show_geo_vectors": true,
+    "show_terrain_contours": false,
     "visual_style": "current"
 }

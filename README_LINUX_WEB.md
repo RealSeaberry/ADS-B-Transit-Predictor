@@ -1,6 +1,10 @@
 # ADS-B Transit Predictor Linux Web Server
 
+<p align="center"><img src="assets/icon.png" width="96" alt="ADS-B Transit Predictor icon"></p>
+
 This package is the Linux/WSL web-server release of ADS-B Transit Predictor. It is not the older Windows desktop `.exe` release.
+
+For release history, read [CHANGELOG.md](CHANGELOG.md).
 
 ## Project Motivation
 
@@ -16,14 +20,20 @@ The older Windows desktop release remains available from previous GitHub Release
 
 ## Screenshots
 
-### S1: Mobile/Tailnet Web UI
-![S1 Web UI](assets/Screenshot_5.jpg)
+### S1: 3D Perspective View
+![S1 3D View](assets/Screenshot_5.jpg)
 
-### S2: Settings And Receiver Configuration
-![S2 Settings](assets/Screenshot_6.jpg)
+### S2: 3D View — Low Pitch / Wide Area
+![S2 3D Low Pitch](assets/Screenshot_6.jpg)
 
-### S3: Live Aviation Map
-![S3 Live Map](assets/Screenshot_7.jpg)
+### S3: 3D View — Aircraft Transit
+![S3 3D Transit](assets/Screenshot_7.jpg)
+
+### S4: 3D View — Aircraft Transit
+![S4 3D Close](assets/Screenshot_8.jpg)
+
+### S5: 3D View — Aircraft close encounter
+![S5 3D Tilted](assets/Screenshot_9.jpg)
 
 ### Network Architecture
 ![Linux Web Architecture](assets/image-2-linux-web-architecture.svg)
@@ -32,15 +42,16 @@ The older Windows desktop release remains available from previous GitHub Release
 
 ```bash
 mkdir -p ~/adsb-transit && cd ~/adsb-transit
-wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web-v1.3.0-20260504.tar.gz"
+wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web.tar.gz"
 tar -xzf ADS-B-Transit-Predictor-linux-web.tar.gz
-cd ADS-B-Transit-Predictor-linux-web-v1.3.0-20260504
+cd ADS-B-Transit-Predictor-*/
 ./scripts/install_linux.sh
 ```
 
 Open a new terminal, then start the receiver and Web UI:
 
 ```bash
+adsb-doctor
 adsb-web
 ```
 
@@ -55,22 +66,62 @@ The HTTPS certificate is self-signed. Accept the browser warning on first visit.
 
 `scripts/install_linux.sh`:
 
-* installs common Linux packages when `apt-get` is available
+* installs common Linux packages with `apt`, `dnf`, `yum`, `pacman`, or `zypper` when available
 * creates `.venv`
 * installs Python dependencies from `requirements.txt`
+* creates `~/.config/adsb-transit/adsb-web.env`
 * registers the `adsb-web` launcher in your shell startup file
+* registers the `adsb-doctor` diagnostics command
+* can install `dump1090`, `readsb`, or only the Web UI dependencies depending on your receiver setup
 
 Useful installer overrides:
 
 ```bash
-ADSB_SKIP_APT=1 ./scripts/install_linux.sh
+ADSB_SKIP_SYSTEM=1 ./scripts/install_linux.sh
 ADSB_SKIP_PIP=1 ./scripts/install_linux.sh
 ADSB_SHELL_RC=~/.bashrc ./scripts/install_linux.sh
+ADSB_INSTALL_DECODER=readsb ./scripts/install_linux.sh
+ADSB_INSTALL_DECODER=none ./scripts/install_linux.sh
+ADSB_INSTALL_RTL_UDEV=1 ./scripts/install_linux.sh
 ```
+
+## Recommended First Run
+
+After installation, run:
+
+```bash
+adsb-doctor
+```
+
+`adsb-doctor` checks the Python environment, decoder commands, SBS/Web ports, WSL detection, `usbipd list`, and attached USB devices. If you ask for help, include its output.
+
+Then start:
+
+```bash
+adsb-web
+```
+
+Runtime defaults are stored in:
+
+```text
+~/.config/adsb-transit/adsb-web.env
+```
+
+Edit this file for persistent receiver settings instead of typing long environment variables every time.
+
+## Before Asking For Help
+
+Run:
+
+```bash
+adsb-doctor
+```
+
+Include the output when reporting install, SDR, decoder, WSL, or port issues. It avoids guesswork and helps identify whether the problem is Python dependencies, USB forwarding, decoder startup, or the SBS feed.
 
 ## Configure usbipd For Windows + WSL
 
-If the RTL-SDR receiver is plugged into Windows and the server runs in WSL, pass the USB device through with `usbipd`.
+If the SDR receiver is plugged into Windows and the server runs in WSL, pass the USB device through with `usbipd`.
 
 Install usbipd from Windows PowerShell if needed:
 
@@ -84,7 +135,7 @@ List USB devices:
 usbipd list
 ```
 
-Bind the RTL-SDR device once:
+Bind the SDR device once:
 
 ```powershell
 usbipd bind --busid <busid>
@@ -96,7 +147,7 @@ Attach it to WSL:
 usbipd attach --wsl --busid <busid>
 ```
 
-`adsb-web` can usually auto-detect and attach a common RTL-SDR receiver. If more than one receiver is connected, specify the BUSID manually:
+`adsb-web` can usually auto-detect and attach common RTL-SDR, Airspy, SDRplay, Mode-S Beast, or FlightAware receiver names shown by `usbipd list`. If more than one receiver is connected, specify the BUSID manually:
 
 ```bash
 ADSB_USB_BUSID=<busid> adsb-web
@@ -113,6 +164,59 @@ Confirm the receiver is visible inside Linux/WSL:
 ```bash
 lsusb
 rtl_test -t
+```
+
+`rtl_test` only applies to RTL2832U-compatible receivers. For Airspy, SDRplay, Beast, network receivers, or another decoder, verify the receiver with that decoder's own test command.
+
+## SDR And Decoder Compatibility
+
+The Web UI does not require a specific SDR. It reads SBS/BaseStation messages from `dump1090`, `readsb`, or any compatible decoder on the configured host and port.
+
+Recommended receiver paths:
+
+| Receiver setup | Recommended mode |
+| --- | --- |
+| RTL-SDR / RTL2832U on the same Linux/WSL machine | default `adsb-web` |
+| Existing local dump1090/readsb already listening on SBS | `ADSB_DECODER_MODE=external adsb-web` |
+| Remote decoder on another computer | set SBS Host/Port in Settings, then `ADSB_DECODER_MODE=external adsb-web` |
+| Airspy / SDRplay / Beast / custom decoder | set `ADSB_DECODER_CMD` in `~/.config/adsb-transit/adsb-web.env` |
+| No receiver yet, demo UI only | `ADSB_DECODER_MODE=none adsb-web` |
+
+Default mode starts local `dump1090-mutability` or `dump1090`, which is intended for RTL-SDR/RTL2832U devices:
+
+```bash
+adsb-web
+```
+
+On Ubuntu, `dump1090-mutability` may be hidden if the `universe` repository is disabled. If installation fails with `E: Unable to locate package dump1090-mutability`, enable `universe` and retry:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y software-properties-common
+sudo add-apt-repository -y universe
+sudo apt-get update
+sudo apt-get install -y dump1090-mutability rtl-sdr
+```
+
+The current installer attempts this automatically. If your distribution still does not provide `dump1090-mutability`, use an existing decoder or custom decoder mode instead of the default RTL-SDR path.
+
+Use an already running decoder, including a remote decoder, by setting the Web UI receiver host/port in Settings or `config.json`, then start only the Web UI stack:
+
+```bash
+ADSB_DECODER_MODE=external adsb-web
+```
+
+Use a custom local decoder command when the SDR needs another decoder or device driver. The command must provide SBS output on `ADSB_SBS_PORT`:
+
+```bash
+ADSB_DECODER_CMD='readsb --device-type airspy --net --net-sbs-port 30003' adsb-web
+```
+
+If automatic USB detection misses your receiver, pass the BUSID manually or override the matching expression:
+
+```bash
+ADSB_USB_BUSID=<busid> adsb-web
+ADSB_USB_MATCH_REGEX='Airspy|SDRplay|0bda:2838' adsb-web
 ```
 
 ## Configure Tailscale
@@ -170,6 +274,8 @@ ADSB_GAIN=49.6 adsb-web
 ADSB_SKIP_USBIPD=1 adsb-web
 ADSB_RESTART=1 adsb-web
 ADSB_HTTPS=0 adsb-web
+ADSB_DECODER_MODE=external adsb-web
+ADSB_DECODER_CMD='readsb --net --net-sbs-port 30003' adsb-web
 ```
 
 ## Basic Use
