@@ -27,10 +27,8 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
-*.spec
+# *.spec files under windows_controller/ are build configuration and are tracked
 
 # Installer logs
 pip-log.txt
@@ -159,7 +157,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-*.spec
 __pycache__/
 *.pyc
 .idea/
@@ -172,3 +169,9 @@ __pycache__/
 /dump1090/
 /web_ui_config.json
 /.web_certs/
+
+# Windows controller — compiled outputs and large binary payload
+/windows_controller/ADSBTransitController-package/
+/windows_controller/wsl_payload.tar.gz
+/windows_controller/build/
+/windows_controller/dist/
