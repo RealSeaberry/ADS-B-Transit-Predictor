@@ -34,6 +34,24 @@ For full Linux/WSL setup, including `usbipd`, Tailscale, HTTPS self-signed certi
 
 For release history, read [CHANGELOG.md](CHANGELOG.md).
 
+## Windows Controller
+
+The Windows controller is a companion desktop application for users running the Linux web server inside WSL. It provides a Windows-side GUI to install, start, stop, and uninstall the server without opening a terminal.
+
+Download `ADS-B-Transit-Predictor-windows-controller-vX.Y.Z-built.zip` from the [GitHub Releases page](https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest).
+
+The package contains three executables:
+
+| Executable | Purpose |
+|---|---|
+| `ADSBTransitInstaller.exe` | Deploys the Linux web server payload into a WSL distro and configures the runtime environment. |
+| `ADSBTransitController.exe` | Start, stop, and restart the server; open the Web UI; manage SDR USB attachment; set observer location. |
+| `ADSBTransitUninstaller.exe` | Removes the WSL-side ADS-B installation. Windows files are left untouched. |
+
+**Prerequisites:** WSL 2 with at least one Linux distro installed and initialized. The installer handles the rest.
+
+Source code for the Windows controller lives on the [`windows-controller`](https://github.com/RealSeaberry/ADS-B-Transit-Predictor/tree/windows-controller) branch of this repository.
+
 ## Latest Linux Web Update Highlights
 
 * Switchable 2D/3D perspective map view: tilt the aviation map for a low-angle perspective of aircraft and transit strip overlays.
@@ -110,11 +128,17 @@ This repository keeps one shared Git history for ADS-B Transit Predictor. Window
 
 Older Windows releases remain preserved by their existing tags and GitHub Release pages. Publishing a new Linux web-server release does not delete or overwrite those assets. Users who need the Windows `.exe` should download the older Windows release asset from the Releases page.
 
+Branch layout:
+
+* `main` — Linux web server source code and the repository entry point.
+* `windows-controller` — Windows controller source, branched from `main`.
+* `windows-desktop-legacy` — original Windows desktop release, preserved for reference.
+
 Release packages may contain platform-specific README content:
 
 * The repository README is a version-selection entry point.
-* The Linux `.tar.gz` package uses a Linux-focused README with `usbipd`, Tailscale, HTTPS, GPS, and `adsb-web` setup.
-* A future Windows package can include a Windows-focused README for the desktop `.exe` workflow.
+* The Linux `.tar.gz` package includes a Linux-focused README covering `usbipd`, Tailscale, HTTPS, GPS, and `adsb-web` setup.
+* The Windows controller `.zip` package includes a Windows-focused README for the controller workflow.
 
 
 ## Acknowledgements
