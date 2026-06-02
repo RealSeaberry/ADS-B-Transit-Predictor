@@ -65,11 +65,8 @@ For release history, read [CHANGELOG.md](CHANGELOG.md).
 ### S3: 3D View — Aircraft Transit
 ![S3 3D Transit](assets/Screenshot_7.jpg)
 
-### S4: 3D View — Aircraft Transit
+### S4: 3D View — Aircraft close encounter
 ![S4 3D Close](assets/Screenshot_8.jpg)
-
-### S5: 3D View — Aircraft close encounter
-![S5 3D Tilted](assets/Screenshot_9.jpg)
 
 ### Linux/WSL Network Architecture
 ![Linux Web Architecture](assets/image-2-linux-web-architecture.svg)
