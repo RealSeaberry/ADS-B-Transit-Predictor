@@ -5,19 +5,22 @@ import time
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from math import radians, degrees, sin, cos, asin, atan2, acos, sqrt, hypot, ceil, tan
-from skyfield.api import load, Topos, wgs84  
-import pygame  
+from skyfield.api import load, Topos, wgs84
+import pygame
 import subprocess
-import sys 
+import sys
 import os
 import json
 import tkinter as tk
-import tkinter.ttk as ttk 
+import tkinter.ttk as ttk
 import traceback
 import collections
 import shapefile
 from shapely.geometry import LineString, Polygon
 import pickle
+import urllib.request
+import urllib.error
+import struct
 
 
 def resource_path(relative_path):
@@ -61,6 +64,8 @@ DEFAULT_CONFLICT_ANGLE_DEG = 2.0
 DEFAULT_EVENT_MIN_ELEVATION_DEG = 2.0
 DEFAULT_DUMP1090_DEVICE_INDEX = 0
 DEFAULT_DUMP1090_GAIN = "-10"
+DEFAULT_DUMP1090_JSON_URL = ""
+DEFAULT_DUMP1090_JSON_INTERVAL_SEC = 1.0
 DEFAULT_AIRCRAFT_HISTORY_MINUTES = 5.0
 DEFAULT_SHOW_AIRCRAFT_HISTORY = True
 DEFAULT_SHOW_EVENT_LOCATIONS = True
@@ -103,11 +108,37 @@ LANDED_ELEVATION_MARGIN_FT = 150.0
 LANDED_RELEASE_MIN_SPEED_KTS = 70.0
 LANDED_RELEASE_SPEED_DELTA_KTS = 15.0
 LOWEST_PLAUSIBLE_AIRCRAFT_ALT_FT = -1650.0
+HIGHEST_PLAUSIBLE_AIRCRAFT_ALT_FT = 70000.0
 ILS_LOC_MAX_DISTANCE_KM = 18.6
 ILS_LOC_MAX_HEADING_DELTA_DEG = 18.0
 ILS_LOC_MIN_HISTORY_SEC = 8.0
 LOC_RELEASE_POSITIVE_VS_UPDATES = 3
 LISTENER_IDLE_RECONNECT_SEC = 90.0
+ALT_GEOM_STALE_SEC = 12.0
+GEOM_FACTOR_UPDATE_INTERVAL_SEC = 10.0
+GEOM_FACTOR_SMOOTHING_ALPHA = 0.25
+GEOM_FACTOR_MAX_STEP = 0.003
+GEOM_FACTOR_JUMP_THRESHOLD_FT = 1000.0
+GEOM_FACTOR_JUMP_CONFIRMATIONS = 2
+GEOM_OFFSET_SMOOTHING_ALPHA = 0.08
+GEOM_OFFSET_MAX_STEP_FT = 30.0
+GEOM_OFFSET_JUMP_THRESHOLD_FT = 500.0
+GEOM_OFFSET_JUMP_CONFIRMATIONS = 3
+GEOM_OFFSET_SAMPLE_WINDOW_SEC = 90.0
+GEOM_OFFSET_MIN_SAMPLES = 3
+GEOM_OFFSET_CLAMP_FT = 2500.0
+ALTITUDE_GATE_WINDOW_SEC = 10.0
+ALTITUDE_GATE_BASE_FT = 1500.0
+ALTITUDE_GATE_CONFIRMATIONS = 3
+ALTITUDE_GATE_MIN_CHANGE_FT = 1.0
+ALTITUDE_GATE_MIN_STEP_FT = 1.0
+ALTITUDE_GATE_MAX_CLIMB_FPM = 8000.0
+ALTITUDE_GATE_REACQUIRE_SEC = 75.0
+POSITION_GATE_BASE_KM = 1.0
+POSITION_GATE_SPEED_MULTIPLIER = 2.5
+POSITION_GATE_CONFIRMATIONS = 2
+VS_SPIKE_BASE_FPM = 1200.0
+VS_SPIKE_MULTIPLIER = 3.0
 # --- Global variables ---
 active_glideslopes = {}; dialog_runway_end_result_storage = [None]; dialog_runway_end_thread = None
 aircraft_dict = {}; event_dict = {}; history_event_count = 0
@@ -190,7 +221,17 @@ def load_config(config_path):
         "show_all_transit_strips": DEFAULT_SHOW_ALL_TRANSIT_STRIPS,
         "velocity_vector_minutes": DEFAULT_VELOCITY_VECTOR_MINUTES,
         "show_velocity_vector": DEFAULT_SHOW_VELOCITY_VECTOR,
-        "vector_layers_visibility": default_vector_visibility
+        "vector_layers_visibility": default_vector_visibility,
+        "alt_correction_mode": "metar",
+        "alt_correction_manual_temp_c": 15.0,
+        "alt_correction_manual_qnh_hpa": 1013.25,
+        "metar_max_airport_km": 100.0,
+        "geoid_correction_enabled": False,
+        "geoid_model": "egm96-15",
+        "geoid_data_path": "",
+        "gps_altitude_correction_enabled": False,
+        "dump1090_json_url": DEFAULT_DUMP1090_JSON_URL,
+        "dump1090_json_interval_sec": DEFAULT_DUMP1090_JSON_INTERVAL_SEC,
     }
     config = default_config.copy()
     try:
@@ -315,6 +356,37 @@ VELOCITY_VECTOR_MINUTES = loaded_settings["velocity_vector_minutes"]
 VELOCITY_VECTOR_SECONDS = VELOCITY_VECTOR_MINUTES * 60.0
 SHOW_VELOCITY_VECTOR = loaded_settings["show_velocity_vector"]
 VECTOR_LAYERS_VISIBILITY = loaded_settings["vector_layers_visibility"].copy()
+
+# -- Altitude correction --
+ALT_CORRECTION_MODE = loaded_settings.get("alt_correction_mode", "metar")
+ALT_CORRECTION_MANUAL_TEMP_C = loaded_settings.get("alt_correction_manual_temp_c", 15.0)
+ALT_CORRECTION_MANUAL_QNH_HPA = loaded_settings.get("alt_correction_manual_qnh_hpa", 1013.25)
+METAR_MAX_AIRPORT_KM = loaded_settings.get("metar_max_airport_km", 100.0)
+GEOID_CORRECTION_ENABLED = bool(loaded_settings.get("geoid_correction_enabled", False))
+GEOID_MODEL = str(loaded_settings.get("geoid_model", "egm96-15") or "egm96-15")
+GEOID_DATA_PATH = str(loaded_settings.get("geoid_data_path", "") or "").strip()
+GPS_ALTITUDE_CORRECTION_ENABLED = bool(loaded_settings.get("gps_altitude_correction_enabled", False))
+DUMP1090_JSON_URL = str(os.environ.get("ADSB_DUMP1090_JSON_URL", loaded_settings.get("dump1090_json_url", DEFAULT_DUMP1090_JSON_URL)) or "").strip()
+try:
+    DUMP1090_JSON_INTERVAL_SEC = float(os.environ.get("ADSB_DUMP1090_JSON_INTERVAL_SEC", loaded_settings.get("dump1090_json_interval_sec", DEFAULT_DUMP1090_JSON_INTERVAL_SEC)) or DEFAULT_DUMP1090_JSON_INTERVAL_SEC)
+except (TypeError, ValueError):
+    DUMP1090_JSON_INTERVAL_SEC = DEFAULT_DUMP1090_JSON_INTERVAL_SEC
+DUMP1090_JSON_INTERVAL_SEC = max(0.2, min(10.0, DUMP1090_JSON_INTERVAL_SEC))
+METAR_WARN_AGE_SEC = 90 * 60
+METAR_MAX_AGE_SEC = 120 * 60
+METAR_REFRESH_EVENT = threading.Event()
+METAR_LOCK = threading.Lock()
+METAR_STATE: dict = {
+    "airport_icao": None, "airport_name": None, "airport_dist_km": None,
+    "raw": None, "temp_c": None, "qnh_hpa": None,
+    "fetched_at": None, "observed_at": None, "age_sec": None,
+    "valid": False, "warning": None, "error": None,
+}
+GEOID_LOCK = threading.Lock()
+GEOID_GRID = None
+GEOID_STATUS = {"enabled": GEOID_CORRECTION_ENABLED, "model": GEOID_MODEL, "path": None, "loaded": False, "error": None}
+GEOID_LAST_LOG = None
+
 try:
     RANGE_RING_SPACING_KM = float(RANGE_RING_SPACING_NM_STR) * NM_TO_KM
     INITIAL_MAP_RANGE_KM = loaded_settings.get("conflict_radius_km", CONFLICT_RADIUS_KM) * 2.0
@@ -368,7 +440,7 @@ eph = None; ts = None; observer_topos = None
 A = 6378.137; F = 1 / 298.257223563; B = A * (1 - F)
 airports_data = []; runways_data = collections.defaultdict(list); navaids_data = []
 _RUNWAY_END_CACHE = None; _RUNWAY_END_CACHE_SOURCE = None
-csv_headers = ['msg_type', 'icao', 'callsign', 'altitude', 'speed', 'track', 'lat', 'lon', 'vs', 'squawk', 'timestamp']
+csv_headers = ['msg_type', 'icao', 'callsign', 'altitude', 'alt_baro', 'alt_geom', 'geom_ref_baro', 'altitude_source', 'geometry_altitude_factor', 'geometry_altitude_offset_ft', 'geometry_altitude_factor_updated', 'speed', 'track', 'lat', 'lon', 'vs', 'squawk', 'timestamp']
 CSV_OUTPUT = False; CSV_FILENAME = 'adsb_data.csv'
 def add_log(msg): print(f"[LOG] {datetime.now(timezone.utc).strftime('%H:%M:%S')} - {msg}")
 def feet_to_km(feet): return feet * 0.3048 / 1000.0
@@ -407,8 +479,404 @@ def parse_basestation_line(line):
         if lat is not None and not(-90<=lat<=90):lat=None
         if lon is not None and not(-180<=lon<=180):lon=None
         vs_eff=normalize_vertical_speed(vs)
-        return{'msg_type':msg_type,'icao':icao,'callsign':callsign,'altitude':altitude,'speed':speed,'track':track,'lat':lat,'lon':lon,'vs':vs_eff,'squawk':squawk,'timestamp':timestamp,'conflict':None,'event_ids':set()}
+        return{'msg_type':msg_type,'icao':icao,'callsign':callsign,'altitude':altitude,'alt_baro':altitude,'alt_geom':None,'altitude_source':'baro'if altitude is not None else None,'speed':speed,'track':track,'lat':lat,'lon':lon,'vs':vs_eff,'squawk':squawk,'timestamp':timestamp,'conflict':None,'event_ids':set()}
     except(ValueError,IndexError):return None
+def _json_float(value):
+    if value in (None, "", "ground"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+def _json_int(value):
+    val = _json_float(value)
+    return int(round(val)) if val is not None else None
+def parse_dump1090_json_aircraft(item, now=None):
+    if not isinstance(item, dict):
+        return None
+    icao = str(item.get('hex') or item.get('icao') or '').upper().strip()
+    if not icao or len(icao) != 6:
+        return None
+    now = now or datetime.now(timezone.utc)
+    seen = _json_float(item.get('seen'))
+    timestamp = now - timedelta(seconds=max(0.0, seen)) if seen is not None and seen < 300 else now
+    alt_baro = _json_int(item.get('alt_baro'))
+    alt_geom = _json_int(item.get('alt_geom'))
+    return {
+        'msg_type': 'JSON',
+        'icao': icao,
+        'callsign': str(item.get('flight') or '').strip() or None,
+        'altitude': None,
+        'alt_baro': None,
+        'alt_geom': alt_geom,
+        'geom_ref_baro': alt_baro,
+        'altitude_source': None,
+        'speed': None,
+        'track': None,
+        'lat': None,
+        'lon': None,
+        'vs': None,
+        'squawk': str(item.get('squawk')).strip() if item.get('squawk') not in (None, '') else None,
+        'timestamp': timestamp,
+        'conflict': None,
+        'event_ids': set(),
+    }
+
+class GeoidGrid:
+    """Lightweight global geoid grid reader for GeographicLib PGM and EGM96 DAC files."""
+
+    def __init__(self, path, width, height, offset_m=0.0, scale_m=1.0, data_offset=0, fmt="pgm"):
+        self.path = path
+        self.width = int(width)
+        self.height = int(height)
+        self.offset_m = float(offset_m)
+        self.scale_m = float(scale_m)
+        self.data_offset = int(data_offset)
+        self.fmt = fmt
+        self._file = open(path, "rb")
+        self._cell_cache = {}
+        self._cache_lock = threading.Lock()
+
+    @classmethod
+    def from_file(cls, path):
+        lower = os.path.basename(path).lower()
+        if lower.endswith(".pgm"):
+            return cls._from_pgm(path)
+        if lower.endswith(".dac") or lower == "ww15mgh.dac":
+            return cls(path, 1440, 721, 0.0, 0.01, 0, "dac")
+        raise ValueError(f"Unsupported geoid file format: {path}")
+
+    @classmethod
+    def _from_pgm(cls, path):
+        with open(path, "rb") as handle:
+            magic = handle.readline().strip()
+            if magic != b"P5":
+                raise ValueError("Geoid PGM must use binary P5 format")
+            comments = {}
+            tokens = []
+            while len(tokens) < 3:
+                line = handle.readline()
+                if not line:
+                    raise ValueError("Unexpected end of geoid PGM header")
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith(b"#"):
+                    try:
+                        text = stripped[1:].decode("utf-8", errors="replace").strip()
+                        parts = text.split(None, 1)
+                        if len(parts) == 2:
+                            comments[parts[0].lower()] = parts[1].strip()
+                    except Exception:
+                        pass
+                    continue
+                tokens.extend(stripped.split())
+            width, height, maxval = (int(tokens[0]), int(tokens[1]), int(tokens[2]))
+            if maxval > 65535:
+                raise ValueError("Unsupported geoid PGM maxval")
+            offset = float(comments.get("offset", 0.0))
+            scale = float(comments.get("scale", 1.0))
+            return cls(path, width, height, offset, scale, handle.tell(), "pgm")
+
+    def close(self):
+        try:
+            self._file.close()
+        except Exception:
+            pass
+
+    def _raw_value(self, x, y):
+        x %= self.width
+        y = max(0, min(self.height - 1, int(y)))
+        if self.fmt == "dac":
+            pos = self.data_offset + ((y * self.width + x) * 2)
+            self._file.seek(pos)
+            return struct.unpack(">h", self._file.read(2))[0] * self.scale_m + self.offset_m
+        pos = self.data_offset + ((y * self.width + x) * 2)
+        self._file.seek(pos)
+        return struct.unpack(">H", self._file.read(2))[0] * self.scale_m + self.offset_m
+
+    def geoid_height_m(self, lat, lon):
+        lat = max(-90.0, min(90.0, float(lat)))
+        lon = float(lon) % 360.0
+        dlat = 180.0 / max(1, self.height - 1)
+        dlon = 360.0 / max(1, self.width)
+        y = (90.0 - lat) / dlat
+        x = lon / dlon
+        y0 = int(np.floor(y))
+        x0 = int(np.floor(x))
+        y1 = min(self.height - 1, y0 + 1)
+        x1 = (x0 + 1) % self.width
+        fy = max(0.0, min(1.0, y - y0))
+        fx = max(0.0, min(1.0, x - x0))
+        key = (x0 % self.width, y0, x1, y1)
+        with self._cache_lock:
+            vals = self._cell_cache.get(key)
+            if vals is None:
+                vals = (
+                    self._raw_value(x0, y0),
+                    self._raw_value(x1, y0),
+                    self._raw_value(x0, y1),
+                    self._raw_value(x1, y1),
+                )
+                if len(self._cell_cache) > 256:
+                    self._cell_cache.clear()
+                self._cell_cache[key] = vals
+        v00, v10, v01, v11 = vals
+        top = v00 * (1.0 - fx) + v10 * fx
+        bottom = v01 * (1.0 - fx) + v11 * fx
+        return top * (1.0 - fy) + bottom * fy
+
+def _candidate_geoid_paths(model=None):
+    model = str(model or GEOID_MODEL or "egm96-15")
+    explicit = str(GEOID_DATA_PATH or "").strip()
+    candidates = []
+    if explicit:
+        candidates.append(explicit)
+        if os.path.isdir(explicit):
+            candidates.extend([
+                os.path.join(explicit, f"{model}.pgm"),
+                os.path.join(explicit, "WW15MGH.DAC"),
+            ])
+    candidates.extend([
+        resource_path(os.path.join("data", "geoid", f"{model}.pgm")),
+        resource_path(os.path.join("data", "geoid", model, f"{model}.pgm")),
+        resource_path(os.path.join("data", "geoid", "WW15MGH.DAC")),
+        resource_path(os.path.join("data", "geoids", f"{model}.pgm")),
+        resource_path(os.path.join("data", "geoids", "WW15MGH.DAC")),
+        os.path.expanduser(os.path.join("~", ".local", "share", "GeographicLib", "geoids", f"{model}.pgm")),
+        os.path.join("/usr", "local", "share", "GeographicLib", "geoids", f"{model}.pgm"),
+        os.path.join("/usr", "share", "GeographicLib", "geoids", f"{model}.pgm"),
+    ])
+    seen = set()
+    clean = []
+    for path in candidates:
+        path = os.path.abspath(os.path.expanduser(path))
+        if path not in seen:
+            seen.add(path)
+            clean.append(path)
+    return clean
+
+def _geoid_log(message):
+    global GEOID_LAST_LOG
+    if message != GEOID_LAST_LOG:
+        print(f"[geoid] {message}")
+        GEOID_LAST_LOG = message
+
+def load_geoid_grid(force=False):
+    global GEOID_GRID, GEOID_STATUS
+    if not GEOID_CORRECTION_ENABLED:
+        with GEOID_LOCK:
+            GEOID_STATUS = {"enabled": False, "model": GEOID_MODEL, "path": None, "loaded": False, "error": None}
+        return None
+    with GEOID_LOCK:
+        if GEOID_GRID is not None and not force:
+            return GEOID_GRID
+        if GEOID_GRID is not None:
+            GEOID_GRID.close()
+            GEOID_GRID = None
+        last_error = None
+        for path in _candidate_geoid_paths(GEOID_MODEL):
+            if not os.path.isfile(path):
+                continue
+            try:
+                GEOID_GRID = GeoidGrid.from_file(path)
+                GEOID_STATUS = {"enabled": True, "model": GEOID_MODEL, "path": path, "loaded": True, "error": None}
+                _geoid_log(f"Loaded {GEOID_MODEL}: {path}")
+                return GEOID_GRID
+            except Exception as exc:
+                last_error = f"{path}: {exc}"
+        GEOID_STATUS = {
+            "enabled": True,
+            "model": GEOID_MODEL,
+            "path": None,
+            "loaded": False,
+            "error": last_error or f"No geoid data file found for {GEOID_MODEL}",
+        }
+        if GEOID_STATUS["error"]:
+            _geoid_log(GEOID_STATUS["error"])
+        return None
+
+def geoid_offset_m(lat, lon):
+    grid = load_geoid_grid()
+    if grid is None:
+        return None
+    try:
+        return grid.geoid_height_m(lat, lon)
+    except Exception as exc:
+        with GEOID_LOCK:
+            GEOID_STATUS["error"] = str(exc)
+        return None
+
+def ellipsoid_alt_ft_to_msl_ft(alt_ellipsoid_ft, lat, lon):
+    try:
+        alt_ft = float(alt_ellipsoid_ft)
+    except (TypeError, ValueError):
+        return alt_ellipsoid_ft
+    if lat is None or lon is None:
+        return alt_ft
+    offset = geoid_offset_m(lat, lon)
+    if offset is None:
+        return alt_ft
+    return alt_ft - offset * 3.280839895
+
+def stable_geometry_offset_candidate(entry, candidate_offset, now):
+    samples = entry.setdefault('geometry_altitude_offset_samples', collections.deque())
+    samples.append((now, float(candidate_offset)))
+    cutoff = now - timedelta(seconds=GEOM_OFFSET_SAMPLE_WINDOW_SEC)
+    while samples and isinstance(samples[0][0], datetime) and samples[0][0] < cutoff:
+        samples.popleft()
+    values = [float(value) for ts, value in samples if isinstance(ts, datetime) and ts >= cutoff]
+    if len(values) < GEOM_OFFSET_MIN_SAMPLES:
+        return None
+    values.sort()
+    mid = len(values) // 2
+    if len(values) % 2:
+        return values[mid]
+    return (values[mid - 1] + values[mid]) / 2.0
+
+def refresh_altitude_model(entry, now=None):
+    now = now or datetime.now(timezone.utc)
+    field_times = entry.setdefault('field_timestamps', {})
+    old_alt, old_source = entry.get('altitude'), entry.get('altitude_source')
+    baro = entry.get('alt_baro')
+    changed = False
+    if baro is not None:
+        if old_alt != baro or old_source != 'baro':
+            entry['altitude'] = baro
+            entry['altitude_source'] = 'baro'
+            field_times['altitude'] = now
+            changed = True
+    entry.setdefault('geometry_altitude_factor', 1.0)
+    entry.setdefault('geometry_altitude_offset_ft', 0.0)
+    if not GPS_ALTITUDE_CORRECTION_ENABLED:
+        if entry.get('geometry_altitude_factor') != 1.0:
+            entry['geometry_altitude_factor'] = 1.0
+            changed = True
+        if abs(float(entry.get('geometry_altitude_offset_ft', 0.0) or 0.0)) > 0.01:
+            entry['geometry_altitude_offset_ft'] = 0.0
+            changed = True
+        entry.pop('geometry_altitude_offset_samples', None)
+        entry.pop('geometry_altitude_offset_pending_ft', None)
+        entry.pop('geometry_altitude_offset_pending_count', None)
+        entry.pop('geometry_altitude_offset_pending_delta_ft', None)
+        return changed
+
+    geom = entry.get('alt_geom')
+    ref_baro = entry.get('geom_ref_baro') if entry.get('geom_ref_baro') is not None else baro
+    if geom is not None and ref_baro is not None:
+        last_offset_update = entry.get('geometry_altitude_factor_updated')
+        last_offset_check = entry.get('geometry_altitude_factor_checked') or last_offset_update
+        due = not isinstance(last_offset_check, datetime) or (now - last_offset_check).total_seconds() >= GEOM_FACTOR_UPDATE_INTERVAL_SEC
+        if due:
+            entry['geometry_altitude_factor_checked'] = now
+            corrected_baro = correct_altitude_ft(ref_baro)
+            try:
+                corrected_baro = float(corrected_baro)
+                geom_val = float(ellipsoid_alt_ft_to_msl_ft(geom, entry.get('lat'), entry.get('lon')))
+                if abs(corrected_baro) > 500.0 and geom_val > -2000.0:
+                    raw_offset = geom_val - corrected_baro
+                    raw_candidate_offset = max(-GEOM_OFFSET_CLAMP_FT, min(GEOM_OFFSET_CLAMP_FT, raw_offset))
+                    candidate_offset = stable_geometry_offset_candidate(entry, raw_candidate_offset, now)
+                    if candidate_offset is None:
+                        return changed
+                    candidate_offset = max(-GEOM_OFFSET_CLAMP_FT, min(GEOM_OFFSET_CLAMP_FT, candidate_offset))
+                    old_offset = float(entry.get('geometry_altitude_offset_ft', 0.0) or 0.0)
+                    jump_ft = abs(candidate_offset - old_offset)
+                    first_update = not isinstance(last_offset_update, datetime)
+                    accept_candidate = True
+                    if jump_ft > GEOM_OFFSET_JUMP_THRESHOLD_FT:
+                        pending_offset = entry.get('geometry_altitude_offset_pending_ft')
+                        pending_count = int(entry.get('geometry_altitude_offset_pending_count', 0) or 0)
+                        try:
+                            pending_offset_f = float(pending_offset)
+                        except (TypeError, ValueError):
+                            pending_offset_f = None
+                        if pending_offset_f is None or abs(pending_offset_f - candidate_offset) > 150.0:
+                            pending_count = 1
+                        else:
+                            pending_count += 1
+                        entry['geometry_altitude_offset_pending_ft'] = candidate_offset
+                        entry['geometry_altitude_offset_pending_count'] = pending_count
+                        entry['geometry_altitude_offset_pending_delta_ft'] = jump_ft
+                        accept_candidate = pending_count >= GEOM_OFFSET_JUMP_CONFIRMATIONS
+                    else:
+                        entry.pop('geometry_altitude_offset_pending_ft', None)
+                        entry.pop('geometry_altitude_offset_pending_count', None)
+                        entry.pop('geometry_altitude_offset_pending_delta_ft', None)
+                    if accept_candidate:
+                        if first_update:
+                            offset = candidate_offset
+                        else:
+                            smoothed = old_offset + (candidate_offset - old_offset) * GEOM_OFFSET_SMOOTHING_ALPHA
+                            max_step = GEOM_OFFSET_MAX_STEP_FT
+                            offset = max(old_offset - max_step, min(old_offset + max_step, smoothed))
+                        offset = max(-GEOM_OFFSET_CLAMP_FT, min(GEOM_OFFSET_CLAMP_FT, offset))
+                        if abs(old_offset - offset) > 1.0:
+                            entry['geometry_altitude_offset_ft'] = offset
+                            changed = True
+                        try:
+                            factor = max(0.85, min(1.20, (corrected_baro + offset) / corrected_baro))
+                            entry['geometry_altitude_factor'] = factor
+                        except ZeroDivisionError:
+                            entry['geometry_altitude_factor'] = 1.0
+                        entry['geometry_altitude_factor_updated'] = now
+                    elif first_update:
+                        entry.setdefault('geometry_altitude_offset_ft', old_offset)
+                    if abs(old_offset - candidate_offset) > 1.0 and not accept_candidate:
+                        changed = True
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+    else:
+        entry.setdefault('geometry_altitude_factor', 1.0)
+        entry.setdefault('geometry_altitude_offset_ft', 0.0)
+    return changed
+
+def corrected_aircraft_altitude_ft(altitude_ft, factor=1.0, offset_ft=0.0):
+    """Return altitude to use for line-of-sight/event geometry."""
+    corrected = correct_altitude_ft(altitude_ft)
+    try:
+        return float(corrected) * float(factor or 1.0) + float(offset_ft or 0.0)
+    except (TypeError, ValueError):
+        return corrected
+
+def geometry_factor_for(ac_data):
+    return 1.0
+
+def geometry_offset_for(ac_data):
+    if not GPS_ALTITUDE_CORRECTION_ENABLED:
+        return 0.0
+    try:
+        return float((ac_data or {}).get('geometry_altitude_offset_ft', 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def aircraft_geometry_altitude_ft(ac_data, altitude_ft=None):
+    if altitude_ft is None:
+        altitude_ft = (ac_data or {}).get('altitude')
+    return corrected_aircraft_altitude_ft(altitude_ft, 1.0, geometry_offset_for(ac_data))
+
+def geometry_altitude_for_predicted(ac_data, predicted_altitude_ft):
+    return corrected_aircraft_altitude_ft(predicted_altitude_ft, 1.0, geometry_offset_for(ac_data))
+
+def correct_altitude_ft(baro_alt_ft):
+    """Return barometric altitude corrected to approximate geometric MSL altitude.
+    Falls back silently to barometric if correction data is unavailable/stale."""
+    global ALT_CORRECTION_MODE, ALT_CORRECTION_MANUAL_TEMP_C, ALT_CORRECTION_MANUAL_QNH_HPA, METAR_LOCK, METAR_STATE
+    if baro_alt_ft is None:
+        return baro_alt_ft
+    if ALT_CORRECTION_MODE == 'manual':
+        temp_c = ALT_CORRECTION_MANUAL_TEMP_C
+        qnh_hpa = ALT_CORRECTION_MANUAL_QNH_HPA
+    elif ALT_CORRECTION_MODE == 'metar':
+        with METAR_LOCK:
+            valid = METAR_STATE.get('valid', False)
+            temp_c = METAR_STATE.get('temp_c')
+            qnh_hpa = METAR_STATE.get('qnh_hpa')
+        if not valid or temp_c is None or qnh_hpa is None:
+            return baro_alt_ft
+    else:
+        return baro_alt_ft
+    return pressure_altitude_to_geometric_ft(baro_alt_ft, temp_c, qnh_hpa)
 def normalize_vertical_speed(vs_fpm):
     if vs_fpm is None:
         return None
@@ -423,6 +891,56 @@ def haversine(lat1, lon1, lat2, lon2):
     lat1r,lon1r,lat2r,lon2r=map(radians,[lat1,lon1,lat2,lon2]);dlat=lat2r-lat1r;dlon=lon2r-lon1r
     a=sin(dlat/2)**2+cos(lat1r)*cos(lat2r)*sin(dlon/2)**2
     return R*2*atan2(sqrt(a),sqrt(1-a))
+def find_nearest_metar_airport(user_lat, user_lon, max_km=100.0):
+    """Return (airport_dict, dist_km) for nearest airport with ICAO code, or (None, None)."""
+    global airports_data
+    best, best_dist = None, float('inf')
+    for apt in airports_data:
+        icao = apt.get('ident', '')
+        if len(icao) != 4:
+            continue
+        if apt.get('type') not in ('large_airport', 'medium_airport', 'small_airport'):
+            continue
+        try:
+            alat, alon = float(apt['lat']), float(apt['lon'])
+        except (TypeError, ValueError, KeyError):
+            continue
+        dist = haversine(user_lat, user_lon, alat, alon)
+        if dist < best_dist:
+            best_dist, best = dist, apt
+    if best is None or best_dist > max_km:
+        return None, None
+    return best, round(best_dist, 1)
+
+def pressure_altitude_to_geometric_ft(pressure_alt_ft, temp_c, qnh_hpa=1013.25):
+    """Convert ADS-B barometric pressure altitude to approximate geometric MSL altitude.
+
+    ADS-B barometric altitude is pressure altitude referenced to 1013.25 hPa.
+    This hypsometric approximation uses surface temperature and QNH from METAR
+    or manual input. It is intentionally conservative; invalid inputs fall back
+    to the original pressure altitude.
+    """
+    try:
+        pressure_alt_m = float(pressure_alt_ft) * 0.3048
+        surface_temp_k = float(temp_c) + 273.15
+        qnh = float(qnh_hpa if qnh_hpa is not None else 1013.25)
+    except (TypeError, ValueError):
+        return pressure_alt_ft
+    if surface_temp_k <= 180.0 or qnh < 800.0 or qnh > 1100.0:
+        return pressure_alt_ft
+    std_pressure_hpa = 1013.25
+    std_temp_k = 288.15
+    lapse_k_per_m = 0.0065
+    exponent_inv = 5.2558797
+    exponent = 1.0 / exponent_inv
+    try:
+        pressure_at_aircraft = std_pressure_hpa * max(1e-6, 1.0 - lapse_k_per_m * pressure_alt_m / std_temp_k) ** exponent_inv
+        ratio = max(1e-6, min(2.0, pressure_at_aircraft / qnh))
+        true_alt_m = (surface_temp_k / lapse_k_per_m) * (1.0 - ratio ** exponent)
+        return true_alt_m / 0.3048
+    except (ValueError, OverflowError, ZeroDivisionError):
+        return pressure_alt_ft
+
 def effective_radius_at_lat(lat, altitude_ft_msl):
     lat_rad=radians(lat);cos_lat_sq=cos(lat_rad)**2;sin_lat_sq=sin(lat_rad)**2
     den=(A**2*cos_lat_sq+B**2*sin_lat_sq)
@@ -493,20 +1011,22 @@ def point_to_segment_distance_km(lat, lon, lat1, lon1, lat2, lon2):
     t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / denom))
     cx, cy = ax + t * dx, ay + t * dy
     return hypot(px - cx, py - cy)
-def angle_between(user_lat, user_lon, user_alt_ft, lat1, lon1, alt1_ft, lat2, lon2, alt2_ft):
-    u,a1,a2=spherical_to_cartesian(user_lat,user_lon,user_alt_ft),spherical_to_cartesian(lat1,lon1,alt1_ft),spherical_to_cartesian(lat2,lon2,alt2_ft)
+def angle_between(user_lat, user_lon, user_alt_ft, lat1, lon1, alt1_ft, lat2, lon2, alt2_ft, factor1=1.0, factor2=1.0, offset1_ft=0.0, offset2_ft=0.0):
+    u=spherical_to_cartesian(user_lat,user_lon,user_alt_ft)
+    a1=spherical_to_cartesian(lat1,lon1,corrected_aircraft_altitude_ft(alt1_ft, factor1, offset1_ft))
+    a2=spherical_to_cartesian(lat2,lon2,corrected_aircraft_altitude_ft(alt2_ft, factor2, offset2_ft))
     if None in[u,a1,a2]:return 180.0
     v1=(a1[0]-u[0],a1[1]-u[1],a1[2]-u[2]);v2=(a2[0]-u[0],a2[1]-u[1],a2[2]-u[2])
     m1_sq,m2_sq=sum(c*c for c in v1),sum(c*c for c in v2)
     if m1_sq==0 or m2_sq==0:return 180.0
     dot=sum(c1*c2 for c1,c2 in zip(v1,v2))
     return degrees(acos(max(-1.0,min(1.0,dot/(sqrt(m1_sq)*sqrt(m2_sq))))))
-def aircraft_azel_approx(lat, lon, altitude_ft, user_lat=None, user_lon=None, user_alt_ft=None):
+def aircraft_azel_approx(lat, lon, altitude_ft, user_lat=None, user_lon=None, user_alt_ft=None, altitude_factor=1.0, altitude_offset_ft=0.0):
     if user_lat is None: user_lat = USER_LAT
     if user_lon is None: user_lon = USER_LON
     if user_alt_ft is None: user_alt_ft = USER_ALT_FT
     observer = spherical_to_cartesian(user_lat, user_lon, user_alt_ft)
-    target = spherical_to_cartesian(lat, lon, altitude_ft)
+    target = spherical_to_cartesian(lat, lon, corrected_aircraft_altitude_ft(altitude_ft, altitude_factor, altitude_offset_ft))
     if observer is None or target is None:
         return None, None
     dx, dy, dz = target[0] - observer[0], target[1] - observer[1], target[2] - observer[2]
@@ -670,6 +1190,25 @@ def prediction_aircraft_state(ac_data, now=None):
             state['prediction_age_sec'] = position_age_sec
             state['altitude_prediction_age_sec'] = altitude_age_sec
     return state
+
+def extrapolated_altitude_for_history(ac_data, now=None):
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        altitude = float(ac_data.get('altitude'))
+    except (TypeError, ValueError):
+        return ac_data.get('altitude')
+    field_times = ac_data.get('field_timestamps') or {}
+    altitude_update = field_times.get('altitude') or ac_data.get('timestamp')
+    if not isinstance(altitude_update, datetime):
+        return altitude
+    try:
+        vs = normalize_vertical_speed(ac_data.get('vs') or 0.0)
+        vs = float(vs or 0.0)
+    except (TypeError, ValueError):
+        vs = 0.0
+    age_sec = max(0.0, (now - altitude_update).total_seconds())
+    return altitude + vs * age_sec / 60.0
 # --- High-precision Solver Helper Functions ---
 def get_3d_pos_at_t(ac_data, t_offset):
     """
@@ -680,7 +1219,7 @@ def get_3d_pos_at_t(ac_data, t_offset):
         ac_data['speed'], ac_data['track'], t_offset, ac_data['vs']
     )
     if lat is None: return None
-    return spherical_to_cartesian(lat, lon, alt)
+    return spherical_to_cartesian(lat, lon, geometry_altitude_for_predicted(ac_data, alt))
 def solve_closest_approach(ac1, ac2, t_center, window=1.5):
     """
     Perform a golden section search within the interval [t_center - window, t_center + window]
@@ -719,12 +1258,12 @@ def solve_closest_approach(ac1, ac2, t_center, window=1.5):
     min_dist_km = sqrt(distance_sq_func(t_min))
     return t_min, min_dist_km
 
-def calculate_transit_ground_slice(p_lat, p_lon, p_alt, body_name, event_time_utc, body_app=None):
+def calculate_transit_ground_slice(p_lat, p_lon, p_alt, body_name, event_time_utc, body_app=None, altitude_factor=1.0, altitude_offset_ft=0.0):
     if not eph or not ts or p_lat is None or p_lon is None or p_alt is None:
         return None
     try:
         earth = eph['earth']
-        aircraft_observer = earth + wgs84.latlon(p_lat, p_lon, elevation_m=feet_to_km(p_alt) * 1000.0)
+        aircraft_observer = earth + wgs84.latlon(p_lat, p_lon, elevation_m=feet_to_km(corrected_aircraft_altitude_ft(p_alt, altitude_factor, altitude_offset_ft)) * 1000.0)
         user_observer = earth + observer_topos if observer_topos else None
         observer = user_observer or aircraft_observer
         t_target = ts.utc(event_time_utc)
@@ -736,7 +1275,8 @@ def calculate_transit_ground_slice(p_lat, p_lon, p_alt, body_name, event_time_ut
 
         terrain_alt_m = float(globals().get('TERRAIN_ALT_M', USER_ALT) or 0.0)
         terrain_source = 'fallback'
-        h_m = feet_to_km(p_alt) * 1000.0 - terrain_alt_m
+        corrected_alt_ft = corrected_aircraft_altitude_ft(p_alt, altitude_factor, altitude_offset_ft)
+        h_m = feet_to_km(corrected_alt_ft) * 1000.0 - terrain_alt_m
         if h_m <= 0:
             return None
 
@@ -747,7 +1287,7 @@ def calculate_transit_ground_slice(p_lat, p_lon, p_alt, body_name, event_time_ut
         toward_body = enu_to_ecef_unit(cos(el_r) * sin(az_r), cos(el_r) * cos(az_r), sin(el_r), dir_lat, dir_lon)
         if toward_body is None:
             return None
-        origin = spherical_to_cartesian(p_lat, p_lon, p_alt)
+        origin = spherical_to_cartesian(p_lat, p_lon, corrected_alt_ft)
         if origin is None:
             return None
 
@@ -784,7 +1324,7 @@ def calculate_transit_ground_slice(p_lat, p_lon, p_alt, body_name, event_time_ut
         if hit is None:
             return None
         c_lat, c_lon = cartesian_to_geodetic(*hit)
-        h_m = feet_to_km(p_alt) * 1000.0 - terrain_alt_m
+        h_m = feet_to_km(corrected_alt_ft) * 1000.0 - terrain_alt_m
         if h_m <= 0:
             return None
         half_width_km = m_to_km(h_m * tan(radians(body_dia_deg / 2.0)) / max(0.05, sin(b_alt.radians)))
@@ -842,7 +1382,7 @@ def calculate_transit_rectangle_for_aircraft(icao_code, current_time_utc):
     def transit_slice(t_offset, body_name):
         p_lat, p_lon, p_alt = predict_position(lat, lon, alt, spd, trk, t_offset, vs)
         if p_lat is None: return None
-        ground = calculate_transit_ground_slice(p_lat, p_lon, p_alt, body_name, current_time_utc + timedelta(seconds=t_offset))
+        ground = calculate_transit_ground_slice(p_lat, p_lon, p_alt, body_name, current_time_utc + timedelta(seconds=t_offset), altitude_offset_ft=geometry_offset_for(ac_data))
         if not ground:
             return None
         return {
@@ -1147,6 +1687,79 @@ def record_positive_vs_update(entry, vs_value):
         return
     entry['positive_vs_updates'] = int(entry.get('positive_vs_updates', 0) or 0) + 1 if vs_float > 0.0 else 0
 
+def should_accept_altitude_update(entry, new_alt, now, vs_value=None):
+    if new_alt is None:
+        return True
+    try:
+        new_alt_f = float(new_alt)
+    except (TypeError, ValueError):
+        return True
+
+    if new_alt_f < LOWEST_PLAUSIBLE_AIRCRAFT_ALT_FT or new_alt_f > HIGHEST_PLAUSIBLE_AIRCRAFT_ALT_FT:
+        entry['rejected_altitude'] = {'value': new_alt_f, 'reason': 'implausible', 'at': now}
+        return False
+    entry.pop('pending_altitude', None)
+    entry.pop('rejected_altitude', None)
+    return True
+
+def should_accept_position_update(entry, new_lat, new_lon, now, speed_value=None):
+    if new_lat is None or new_lon is None or entry.get('lat') is None or entry.get('lon') is None:
+        return True
+    field_times = entry.get('field_timestamps') or {}
+    pos_time = field_times.get('position') or field_times.get('lat') or field_times.get('lon') or entry.get('timestamp')
+    dt = max(0.0, (now - pos_time).total_seconds()) if isinstance(pos_time, datetime) else 0.0
+    if dt > max(20.0, AIRCRAFT_TIMEOUT * 0.5):
+        entry.pop('pending_position', None)
+        return True
+    try:
+        speed = float(speed_value if speed_value is not None else entry.get('speed') or 0.0)
+        dist = haversine(float(entry.get('lat')), float(entry.get('lon')), float(new_lat), float(new_lon))
+    except (TypeError, ValueError):
+        return True
+    reachable = speed * 1.852 / 3600.0 * max(dt, 1.0) * POSITION_GATE_SPEED_MULTIPLIER + POSITION_GATE_BASE_KM
+    if dist <= reachable:
+        entry.pop('pending_position', None)
+        return True
+    pending = entry.get('pending_position') or {}
+    try:
+        pending_lat = float(pending.get('lat'))
+        pending_lon = float(pending.get('lon'))
+        pending_dist = haversine(pending_lat, pending_lon, float(new_lat), float(new_lon))
+    except (TypeError, ValueError, AttributeError):
+        pending_dist = float('inf')
+    count = int(pending.get('count', 0) or 0) if isinstance(pending, dict) else 0
+    if pending_dist > max(0.5, reachable * 0.35):
+        count = 1
+    else:
+        count += 1
+    entry['pending_position'] = {'lat': float(new_lat), 'lon': float(new_lon), 'count': count, 'since': now, 'distance_km': dist}
+    return count >= POSITION_GATE_CONFIRMATIONS
+
+def smooth_vs_for_telemetry(entry, new_vs):
+    if new_vs is None:
+        return None
+    try:
+        new_vs_f = float(new_vs)
+    except (TypeError, ValueError):
+        return new_vs
+    history = list(entry.get('telemetry_history', []))[-8:]
+    if not history:
+        return normalize_vertical_speed(new_vs_f)
+    samples = []
+    for item in history:
+        try:
+            samples.append(float(item[3]))
+        except (TypeError, ValueError, IndexError):
+            pass
+    if not samples:
+        return normalize_vertical_speed(new_vs_f)
+    avg = sum(samples) / len(samples)
+    allowed = max(VS_SPIKE_BASE_FPM, VS_SPIKE_MULTIPLIER * max(300.0, abs(avg)))
+    if abs(new_vs_f - avg) > allowed:
+        return normalize_vertical_speed(avg)
+    blended = avg * 0.35 + new_vs_f * 0.65
+    return normalize_vertical_speed(blended)
+
 def should_release_grounded(entry, data):
     speed = data.get('speed') if data.get('speed') is not None else entry.get('speed')
     vs = data.get('vs') if data.get('vs') is not None else entry.get('vs')
@@ -1237,10 +1850,13 @@ def update_grounded_and_approach_state(entry, now):
         entry['approach_status'] = None
 
 def update_aircraft(data):
-    tracked_fields = ('callsign', 'altitude', 'speed', 'track', 'lat', 'lon', 'vs', 'squawk')
+    tracked_fields = ('callsign', 'alt_baro', 'alt_geom', 'geom_ref_baro', 'speed', 'track', 'lat', 'lon', 'vs', 'squawk')
     with lock:
         icao,now,lat,lon,alt=data['icao'],data['timestamp'],data.get('lat'),data.get('lon'),data.get('altitude')
         speed,track,vs=data.get('speed'),data.get('track'),data.get('vs')
+        is_json_update = data.get('msg_type') == 'JSON'
+        if data.get('alt_baro') is None and data.get('alt_geom') is None and alt is not None:
+            data['alt_baro'] = alt
         if icao in aircraft_dict:
             entry=aircraft_dict[icao]
             ev_ids=entry.get('event_ids',set())
@@ -1260,8 +1876,17 @@ def update_aircraft(data):
             for k in ('msg_type', 'icao'):
                 if data.get(k) is not None:
                     entry[k]=data[k]
+            if not protected_grounded and not is_json_update:
+                if data.get('alt_baro') is not None and not should_accept_altitude_update(entry, data.get('alt_baro'), now, data.get('vs')):
+                    data['alt_baro'] = None
+                    data['altitude'] = None
+                if (data.get('lat') is not None or data.get('lon') is not None) and not should_accept_position_update(entry, data.get('lat'), data.get('lon'), now, data.get('speed')):
+                    data['lat'] = None
+                    data['lon'] = None
+                if data.get('vs') is not None:
+                    data['vs'] = smooth_vs_for_telemetry(entry, data.get('vs'))
             for k in tracked_fields:
-                if protected_grounded and k in {'altitude', 'lat', 'lon'}:
+                if protected_grounded and k in {'alt_baro', 'alt_geom', 'geom_ref_baro', 'lat', 'lon'}:
                     continue
                 v=data.get(k)
                 if v is None:
@@ -1272,13 +1897,18 @@ def update_aircraft(data):
                     entry[k]=v
                     field_times[k]=now
                     changed_fields.add(k)
+            altitude_model_input_changed = (not is_json_update) or bool(changed_fields.intersection({'alt_baro', 'alt_geom', 'geom_ref_baro'}))
+            if not protected_grounded and altitude_model_input_changed and refresh_altitude_model(entry, now):
+                changed_fields.add('altitude')
             if 'lat' in changed_fields or 'lon' in changed_fields:
                 field_times['position']=now
-            entry['timestamp'],entry['event_ids']=now,ev_ids
+            if not is_json_update:
+                entry['timestamp']=now
+            entry['event_ids']=ev_ids
             if ('lat' in changed_fields or 'lon' in changed_fields) and entry.get('lat') is not None and entry.get('lon') is not None and entry.get('altitude') is not None:
                 if'history'not in entry:entry['history']=collections.deque(maxlen=aircraft_history_maxlen())
                 elif getattr(entry['history'], 'maxlen', None) != aircraft_history_maxlen():entry['history']=collections.deque(entry['history'], maxlen=aircraft_history_maxlen())
-                entry['history'].append((now,entry.get('lat'),entry.get('lon'),entry.get('altitude')))
+                entry['history'].append((now,entry.get('lat'),entry.get('lon'),extrapolated_altitude_for_history(entry, now)))
             if changed_fields.intersection({'speed','track','vs'}) and entry.get('speed') is not None and entry.get('track') is not None and entry.get('vs') is not None:
                 if'telemetry_history'not in entry:entry['telemetry_history']=collections.deque(maxlen=MAX_TELEMETRY_HISTORY_POINTS_PER_AC)
                 entry['telemetry_history'].append((now,entry.get('speed'),entry.get('track'),entry.get('vs')))
@@ -1286,16 +1916,42 @@ def update_aircraft(data):
         else:
             base={k:None for k in csv_headers if k!='timestamp'};base.update(data);base['timestamp'],base['event_ids']=now,set();base['grounded']=False;base['approach_status']=None;base['positive_vs_updates']=0
             if vs is not None:
+                base['vs'] = smooth_vs_for_telemetry(base, vs)
+                vs = base['vs']
                 record_positive_vs_update(base, vs)
             base['field_timestamps']={k:now for k in tracked_fields if base.get(k) is not None}
+            refresh_altitude_model(base, now)
+            if base.get('altitude') is not None:
+                base['field_timestamps']['altitude']=now
             if base.get('lat') is not None or base.get('lon') is not None:
                 base['field_timestamps']['position']=now
             base['history']=collections.deque(maxlen=aircraft_history_maxlen())
             if lat is not None and lon is not None and alt is not None:base['history'].append((now,lat,lon,alt))
             base['telemetry_history']=collections.deque(maxlen=MAX_TELEMETRY_HISTORY_POINTS_PER_AC)
-            if speed is not None and track is not None and vs is not None:base['telemetry_history'].append((now,speed,track,vs))
+            if speed is not None and track is not None and vs is not None:base['telemetry_history'].append((now,speed,track,base.get('vs')))
             update_grounded_and_approach_state(base, now)
             aircraft_dict[icao]=base
+def dump1090_json_listener():
+    if not DUMP1090_JSON_URL:
+        return
+    print(f"[*] Polling dump1090/readsb JSON: {DUMP1090_JSON_URL}")
+    last_warn = 0.0
+    while running:
+        try:
+            req = urllib.request.Request(DUMP1090_JSON_URL, headers={"User-Agent": "ADS-B-Transit-Predictor/1.4"})
+            with urllib.request.urlopen(req, timeout=3.0) as response:
+                payload = json.loads(response.read().decode('utf-8', errors='replace'))
+            items = payload.get('aircraft', []) if isinstance(payload, dict) else []
+            now = datetime.now(timezone.utc)
+            for item in items:
+                parsed = parse_dump1090_json_aircraft(item, now)
+                if parsed:
+                    update_aircraft(parsed)
+        except Exception as exc:
+            if time.monotonic() - last_warn > 30.0:
+                print(f"[json] Could not read dump1090/readsb JSON: {exc}")
+                last_warn = time.monotonic()
+        time.sleep(DUMP1090_JSON_INTERVAL_SEC)
 def get_active_aircraft():
     """
     Retrieve currently active aircraft for map display.
@@ -1489,7 +2145,7 @@ def predict_conflicts():
                     continue
                 
                 # Altitude filtering (Vertical separation threshold: 5000ft)
-                alt1, alt2 = ac1.get('altitude'), ac2.get('altitude')
+                alt1, alt2 = ac1_pred.get('altitude'), ac2_pred.get('altitude')
                 if alt1 is not None and alt2 is not None:
                     if abs(alt1 - alt2) > 5000: continue
                 else: continue
@@ -1506,7 +2162,12 @@ def predict_conflicts():
                     if p1[0] is None or p2[0] is None: continue
                     
                     # Line-of-sight (LOS) angular separation check
-                    ang = angle_between(USER_LAT, USER_LON, USER_ALT_FT, p1[0], p1[1], p1[2], p2[0], p2[1], p2[2])
+                    ang = angle_between(
+                        USER_LAT, USER_LON, USER_ALT_FT,
+                        p1[0], p1[1], p1[2],
+                        p2[0], p2[1], p2[2],
+                        1.0, 1.0, geometry_offset_for(ac1_pred), geometry_offset_for(ac2_pred)
+                    )
                     
                     if ang <= CONFLICT_ANGLE_DEG:
                         precise_t, min_dist = solve_closest_approach(ac1_pred, ac2_pred, dt, window=PREDICTION_STEP * 1.5)
@@ -1525,9 +2186,10 @@ def predict_conflicts():
                             break 
                         precise_angle = angle_between(USER_LAT, USER_LON, USER_ALT_FT, 
                                                       p1_f[0], p1_f[1], p1_f[2], 
-                                                      p2_f[0], p2_f[1], p2_f[2])
-                        approx_az1, approx_el1 = aircraft_azel_approx(p1_f[0], p1_f[1], p1_f[2])
-                        approx_az2, approx_el2 = aircraft_azel_approx(p2_f[0], p2_f[1], p2_f[2])
+                                                      p2_f[0], p2_f[1], p2_f[2],
+                                                      1.0, 1.0, geometry_offset_for(ac1_pred), geometry_offset_for(ac2_pred))
+                        approx_az1, approx_el1 = aircraft_azel_approx(p1_f[0], p1_f[1], p1_f[2], altitude_offset_ft=geometry_offset_for(ac1_pred))
+                        approx_az2, approx_el2 = aircraft_azel_approx(p2_f[0], p2_f[1], p2_f[2], altitude_offset_ft=geometry_offset_for(ac2_pred))
                         if approx_el1 is None or approx_el2 is None or min(approx_el1, approx_el2) < min_event_el:
                             continue
 
@@ -1542,7 +2204,8 @@ def predict_conflicts():
 
                                 def get_azel(geo_pos, time_obj):
                                     if geo_pos[0] is None: return 0, 0
-                                    pos = wgs84.latlon(geo_pos[0], geo_pos[1], elevation_m=feet_to_km(geo_pos[2])*1000.0)
+                                    offset = geometry_offset_for(ac1_pred) if geo_pos is p1_f or geo_pos is p1_v else geometry_offset_for(ac2_pred)
+                                    pos = wgs84.latlon(geo_pos[0], geo_pos[1], elevation_m=feet_to_km(corrected_aircraft_altitude_ft(geo_pos[2], 1.0, offset))*1000.0)
                                     app = user_obs.at(time_obj).observe(earth_obj + pos).apparent()
                                     alt_deg, az_deg, _ = app.altaz()
                                     return az_deg.degrees, alt_deg.degrees
@@ -1646,7 +2309,7 @@ def predict_celestial_conflicts():
             
             try:
                 # 2. Construct Skyfield WGS84 position object
-                pos_wgs84 = wgs84.latlon(pl, pn, elevation_m=feet_to_km(pa)*1000.0)
+                pos_wgs84 = wgs84.latlon(pl, pn, elevation_m=feet_to_km(geometry_altitude_for_predicted(ac_base, pa))*1000.0)
                 t_inst = ts.utc(start_time_base + timedelta(seconds=t_sec))
                 
                 # 3. Perform observation from topocentric location
@@ -1754,7 +2417,7 @@ def predict_celestial_conflicts():
                 pl, pn, pa = predict_position(lat, lon, alt, spd, trk, dt, vs)
                 if pl is None: continue
 
-                ac_az, ac_el = aircraft_azel_approx(pl, pn, pa)
+                ac_az, ac_el = aircraft_azel_approx(pl, pn, pa, altitude_offset_ft=geometry_offset_for(ac))
                 if ac_az is None or ac_el is None or ac_el < min_event_el:
                     continue
 
@@ -1784,7 +2447,7 @@ def predict_celestial_conflicts():
                                 
                                 # Re-calculate position at the exact refined timestamp for POV logging
                                 pl_f, pn_f, pa_f = predict_position(lat, lon, alt, spd, trk, precise_t, vs)
-                                pos_f = wgs84.latlon(pl_f, pn_f, elevation_m=feet_to_km(pa_f)*1000.0)
+                                pos_f = wgs84.latlon(pl_f, pn_f, elevation_m=feet_to_km(geometry_altitude_for_predicted(ac, pa_f))*1000.0)
                                 ac_app_f = user_observer.at(t_final).observe(earth_obj + pos_f).apparent()
                                 sun_app_f = user_observer.at(t_final).observe(sun_obj).apparent()
                                 
@@ -1792,7 +2455,7 @@ def predict_celestial_conflicts():
                                 s_alt_f, s_az_f, _ = sun_app_f.altaz()
                                 if alt_f.degrees < min_event_el or s_alt_f.degrees < min_event_el:
                                     continue
-                                transit_slice_f = calculate_transit_ground_slice(pl_f, pn_f, pa_f, 'sun', pt_final, sun_app_f)
+                                transit_slice_f = calculate_transit_ground_slice(pl_f, pn_f, pa_f, 'sun', pt_final, sun_app_f, altitude_offset_ft=geometry_offset_for(ac))
 
                                 # Calculate velocity vector (sampled 1 second later)
                                 dt_vec = 1.0
@@ -1800,7 +2463,7 @@ def predict_celestial_conflicts():
                                 az_vec, el_vec = az_f.degrees, alt_f.degrees
                                 if pl_v is not None:
                                     try:
-                                        pos_v = wgs84.latlon(pl_v, pn_v, elevation_m=feet_to_km(pa_v)*1000.0)
+                                        pos_v = wgs84.latlon(pl_v, pn_v, elevation_m=feet_to_km(geometry_altitude_for_predicted(ac, pa_v))*1000.0)
                                         t_vec = ts.utc(now + timedelta(seconds=precise_t + dt_vec))
                                         ac_app_v = user_observer.at(t_vec).observe(earth_obj + pos_v).apparent()
                                         alt_v, az_v, _ = ac_app_v.altaz()
@@ -1860,7 +2523,7 @@ def predict_celestial_conflicts():
                                 t_final = ts.utc(pt_final)
                                 
                                 pl_f, pn_f, pa_f = predict_position(lat, lon, alt, spd, trk, precise_t, vs)
-                                pos_f = wgs84.latlon(pl_f, pn_f, elevation_m=feet_to_km(pa_f)*1000.0)
+                                pos_f = wgs84.latlon(pl_f, pn_f, elevation_m=feet_to_km(geometry_altitude_for_predicted(ac, pa_f))*1000.0)
                                 ac_app_f = user_observer.at(t_final).observe(earth_obj + pos_f).apparent()
                                 moon_app_f = user_observer.at(t_final).observe(moon_obj).apparent()
                                 
@@ -1868,14 +2531,14 @@ def predict_celestial_conflicts():
                                 m_alt_f, m_az_f, _ = moon_app_f.altaz()
                                 if alt_f.degrees < min_event_el or m_alt_f.degrees < min_event_el:
                                     continue
-                                transit_slice_f = calculate_transit_ground_slice(pl_f, pn_f, pa_f, 'moon', pt_final, moon_app_f)
+                                transit_slice_f = calculate_transit_ground_slice(pl_f, pn_f, pa_f, 'moon', pt_final, moon_app_f, altitude_offset_ft=geometry_offset_for(ac))
 
                                 dt_vec = 1.0
                                 pl_v, pn_v, pa_v = predict_position(lat, lon, alt, spd, trk, precise_t + dt_vec, vs)
                                 az_vec, el_vec = az_f.degrees, alt_f.degrees
                                 if pl_v is not None:
                                     try:
-                                        pos_v = wgs84.latlon(pl_v, pn_v, elevation_m=feet_to_km(pa_v)*1000.0)
+                                        pos_v = wgs84.latlon(pl_v, pn_v, elevation_m=feet_to_km(geometry_altitude_for_predicted(ac, pa_v))*1000.0)
                                         t_vec = ts.utc(now + timedelta(seconds=precise_t + dt_vec))
                                         ac_app_v = user_observer.at(t_vec).observe(earth_obj + pos_v).apparent()
                                         alt_v, az_v, _ = ac_app_v.altaz()

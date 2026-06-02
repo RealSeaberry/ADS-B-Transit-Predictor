@@ -31,12 +31,12 @@ Environment overrides:
   ADSB_VENV_DIR=.venv      Python virtual environment path
   ADSB_ENV_FILE=...        Runtime config file written by the installer
   ADSB_SHELL_RC=~/.bashrc  Shell rc file where the adsb-web launcher is added
-  ADSB_INSTALL_DECODER=auto  auto, dump1090, readsb, or none
+  ADSB_INSTALL_DECODER=auto  auto or none
   ADSB_INSTALL_RTL_UDEV=1  Install a basic RTL-SDR udev rule on native Linux
 
 Examples:
   ./scripts/install_linux.sh
-  ADSB_INSTALL_DECODER=readsb ./scripts/install_linux.sh
+  ADSB_INSTALL_DECODER=none ./scripts/install_linux.sh
   ADSB_SKIP_SYSTEM=1 ./scripts/install_linux.sh
   ADSB_SKIP_PIP=1 ./scripts/install_linux.sh
 EOF
@@ -61,6 +61,13 @@ detect_shell_rc() {
 
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+python_version_ok() {
+  "$1" - <<'PY'
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 8) else 1)
+PY
 }
 
 run_sudo() {
@@ -153,16 +160,16 @@ install_system_dependencies() {
   echo "[install] Installing base system packages with ${pm}"
   case "${pm}" in
     apt)
-      install_packages "${pm}" python3 python3-venv python3-tk ca-certificates curl tar rtl-sdr usbutils iproute2
+      install_packages "${pm}" python3 python3-venv python3-pip python3-dev python3-tk build-essential pkg-config ca-certificates curl tar git rtl-sdr usbutils iproute2
       ;;
     dnf|yum)
-      install_packages "${pm}" python3 python3-tkinter ca-certificates curl tar rtl-sdr usbutils iproute
+      install_packages "${pm}" python3 python3-pip python3-devel python3-tkinter gcc gcc-c++ make pkgconf-pkg-config ca-certificates curl tar git rtl-sdr usbutils iproute
       ;;
     pacman)
-      install_packages "${pm}" python python-pip ca-certificates curl tar rtl-sdr usbutils iproute2
+      install_packages "${pm}" python python-pip base-devel pkgconf ca-certificates curl tar git rtl-sdr usbutils iproute2
       ;;
     zypper)
-      install_packages "${pm}" python3 python3-venv python3-tk ca-certificates curl tar rtl-sdr usbutils iproute2
+      install_packages "${pm}" python3 python3-venv python3-pip python3-devel python3-tk gcc gcc-c++ make pkg-config ca-certificates curl tar git rtl-sdr usbutils iproute2
       ;;
   esac
 
@@ -175,42 +182,42 @@ install_decoder_package() {
     echo "[install] Skipping ADS-B decoder package installation"
     return
   fi
+  if [[ "${INSTALL_DECODER}" != "auto" ]]; then
+    echo "[install] ADSB_INSTALL_DECODER=${INSTALL_DECODER} is no longer an installer selection in this release."
+    echo "[install] Use ADSB_DECODER_MODE=external or ADSB_DECODER_CMD='...' at runtime for custom decoders."
+    INSTALL_DECODER="auto"
+  fi
 
   if have_cmd dump1090-mutability || have_cmd dump1090 || have_cmd readsb; then
     echo "[install] ADS-B decoder already available"
     return
   fi
 
-  echo "[install] Trying to install ADS-B decoder package (${INSTALL_DECODER})"
-  case "${pm}:${INSTALL_DECODER}" in
-    apt:auto|apt:dump1090)
+  echo "[install] Trying to install a packaged ADS-B decoder"
+  case "${pm}" in
+    apt)
       install_packages apt dump1090-mutability \
         || (enable_ubuntu_universe && install_packages apt dump1090-mutability) \
+        || install_packages apt dump1090 \
+        || install_packages apt readsb \
         || {
-          echo "[install] dump1090-mutability not available from current apt repositories"
-          echo "[install] Use ADSB_DECODER_MODE=external for an existing decoder, or install readsb/dump1090 manually"
+          echo "[install] No ADS-B decoder package was found in this apt repository."
+          echo "[install] The Web UI can still use an existing decoder:"
+          echo "          ADSB_DECODER_MODE=external adsb-web"
+          echo "          ADSB_DECODER_CMD='readsb --net --net-sbs-port 30003 ...' adsb-web"
         }
       ;;
-    apt:readsb)
-      install_packages apt readsb || echo "[install] readsb not available in this apt repository"
+    dnf|yum)
+      install_packages "${pm}" dump1090 || install_packages "${pm}" readsb || echo "[install] No decoder package found in this repository"
       ;;
-    dnf:auto|dnf:dump1090|yum:auto|yum:dump1090)
-      install_packages "${pm}" dump1090 || echo "[install] dump1090 not available in this repository"
+    pacman)
+      install_packages pacman dump1090 || install_packages pacman readsb || echo "[install] No decoder package found; check AUR/readsb options"
       ;;
-    dnf:readsb|yum:readsb)
-      install_packages "${pm}" readsb || echo "[install] readsb not available in this repository"
-      ;;
-    pacman:auto|pacman:dump1090)
-      install_packages pacman dump1090 || echo "[install] dump1090 not available; check AUR/readsb options"
-      ;;
-    pacman:readsb)
-      install_packages pacman readsb || echo "[install] readsb not available; check AUR options"
-      ;;
-    zypper:auto|zypper:dump1090|zypper:readsb)
+    zypper)
       install_packages zypper readsb || install_packages zypper dump1090 || echo "[install] No decoder package found in this repository"
       ;;
     *)
-      echo "[install] Unknown ADSB_INSTALL_DECODER=${INSTALL_DECODER}; skipping decoder package"
+      echo "[install] No supported package manager for decoder installation"
       ;;
   esac
 }
@@ -234,12 +241,17 @@ install_rtl_udev_rule() {
 }
 
 install_python_dependencies() {
-  local python_bin="python3"
+  local python_bin="${ADSB_PYTHON:-python3}"
   if ! have_cmd "${python_bin}"; then
     if have_cmd python; then python_bin="python"; else
       echo "[install] Python was not found" >&2
       exit 1
     fi
+  fi
+  if ! python_version_ok "${python_bin}"; then
+    echo "[install] ${python_bin} is too old. ADS-B Transit Predictor requires Python 3.8 or newer." >&2
+    echo "[install] Use Ubuntu 20.04+ / Debian 11+ / a current distro, or install a newer Python and set ADSB_PYTHON." >&2
+    exit 1
   fi
 
   echo "[install] Creating Python virtual environment at ${VENV_DIR}"
@@ -282,12 +294,13 @@ install_runtime_config() {
 # This file is loaded by adsb-web before reading environment variables.
 
 # Web UI
-ADSB_WEB_HOST=100.75.150.117
+ADSB_WEB_HOST=127.0.0.1
 ADSB_WEB_PORT=8090
 ADSB_HTTPS=1
 
 # Decoder connection and startup.
-# auto: start local dump1090 when no SBS listener is already running.
+# auto: start local decoder when no SBS listener is already running.
+# The launcher prefers dump1090-mutability/dump1090/readsb when installed.
 # external: do not start a decoder; use an existing local/remote SBS feed.
 # none: do not start a decoder.
 ADSB_DECODER_MODE=auto
@@ -297,12 +310,21 @@ ADSB_SBS_PORT=30003
 ADSB_GAIN=-10
 ADSB_DEVICE_INDEX=0
 
-# WSL usbipd. Leave empty for auto-detection, or set a BUSID from "usbipd list".
+# WSL-only usbipd. Native Linux ignores these values.
+# Leave empty for WSL auto-detection, or set a BUSID from "usbipd list".
 ADSB_USB_BUSID=
 ADSB_USB_MATCH_REGEX='0bda:2838|0bda:2832|RTL2838|RTL-SDR|Bulk-In|Airspy|SDRplay|RSP|HackRF|Mode-S Beast|FlightAware|Pro Stick'
 
 # Custom decoder example:
 # ADSB_DECODER_CMD='readsb --device-type airspy --net --net-sbs-port 30003'
+
+# Optional dump1090-fa/readsb JSON feed. Used only when GPS altitude correction is enabled in the Web UI.
+ADSB_DUMP1090_JSON_URL=
+ADSB_DUMP1090_JSON_DIR=/tmp/adsb-transit-dump1090-json
+# ADSB_DUMP1090_JSON_URL='http://127.0.0.1/dump1090-fa/data/aircraft.json'
+# ADSB_DUMP1090_JSON_URL='http://127.0.0.1:8080/data/aircraft.json'
+# ADSB_DUMP1090_JSON_URL='file:///tmp/adsb-transit-dump1090-json/aircraft.json'
+ADSB_DUMP1090_JSON_INTERVAL_SEC=1
 EOF
   echo "[install] Created runtime config: ${CONFIG_FILE}"
 }
@@ -319,9 +341,12 @@ print_next_steps() {
   echo "          ${CONFIG_FILE}"
   echo ""
   echo "[install] Compatibility notes:"
-  echo "          RTL-SDR/RTL2832U: default dump1090 path should work."
+  echo "          Native Linux + existing decoder on 127.0.0.1:${ADSB_SBS_PORT:-30003}: default adsb-web should work without usbipd."
+  echo "          Native Linux + RTL-SDR: install decoder packages, or use ADSB_DECODER_CMD for your decoder."
+  echo "          Older Ubuntu/WSL: if dump1090-mutability is unavailable, use an external decoder or custom ADSB_DECODER_CMD."
   echo "          Existing or remote decoder: ADSB_DECODER_MODE=external adsb-web"
   echo "          Airspy/SDRplay/custom decoder: ADSB_DECODER_CMD='...' adsb-web"
+  echo "          Remote browser access: set ADSB_WEB_HOST to your Tailscale IP or 0.0.0.0 on a trusted private network."
   echo "          WSL USB attach: set ADSB_USB_BUSID=<busid> if auto-detect misses it."
 }
 

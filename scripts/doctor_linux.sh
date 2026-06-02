@@ -62,6 +62,11 @@ check_cmd rtl_test
 check_cmd dump1090-mutability
 check_cmd dump1090
 check_cmd readsb
+if have_cmd dump1090-mutability || have_cmd dump1090 || have_cmd readsb || have_cmd dump1090-fa; then
+  ok "ADS-B decoder available"
+else
+  warn "No local decoder found; use ADSB_DECODER_MODE=external or ADSB_DECODER_CMD for another receiver/decoder"
+fi
 
 echo
 echo "Decoder mode: ${ADSB_DECODER_MODE:-auto}"

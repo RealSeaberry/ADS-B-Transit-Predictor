@@ -11,12 +11,12 @@ import sys
 import threading
 import time
 from collections import OrderedDict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 
 from skyfield.framelib import ecliptic_frame
 
@@ -26,7 +26,7 @@ ASSETS_DIR = ROOT_DIR / "assets"
 WEB_CONFIG_PATH = ROOT_DIR / "web_ui_config.json"
 CERT_DIR = ROOT_DIR / ".web_certs"
 ELEVATION_CACHE_PATH = ROOT_DIR / "data" / "cache" / "elevation_cache.json"
-APP_VERSION = os.environ.get("ADSB_APP_VERSION", "1.3.0-dev")
+APP_VERSION = os.environ.get("ADSB_APP_VERSION", "1.4.1")
 PROJECT_URL = "https://github.com/RealSeaberry/ADS-B-Transit-Predictor"
 ELEVATION_RANGE_OPTIONS_NM = [5, 10, 25, 50, 100]
 ELEVATION_PRECISION_STEPS_KM = {"low": 3.0, "medium": 1.5, "high": 0.5}
@@ -52,6 +52,10 @@ TERRAIN_DOWNLOAD_PAUSE_EVENT = threading.Event()
 MAP_CACHE_EVENT = threading.Event()
 HIGH_VECTOR_LOAD_LOCK = threading.Lock()
 HIGH_VECTOR_LOAD_STARTED = False
+METAR_FETCH_LOCK = threading.Lock()
+METAR_MIN_FETCH_INTERVAL_SEC = 10 * 60
+METAR_FORCE_MIN_FETCH_INTERVAL_SEC = 90
+METAR_LAST_FETCH_ATTEMPT = {"icao": None, "monotonic": 0.0}
 MAX_CLIENT_STATE_CACHES = 8
 MAX_VECTOR_GEODATA_CACHE = 48
 MAX_TERRAIN_CONTOUR_CACHE = 32
@@ -110,6 +114,12 @@ STATE_CACHE_REQUEST = {
 STATE_CACHE_REQUESTS = {DEFAULT_CLIENT_ID: STATE_CACHE_REQUEST.copy()}
 STATE_CACHE = new_state_cache()
 CLIENT_STATE_CACHES = {DEFAULT_CLIENT_ID: STATE_CACHE}
+AIRCRAFT_LABEL_FIELDS = {
+    "callsign", "icao", "distance", "altitude", "corrected_alt_asl",
+    "altitude_factor", "altitude_offset", "speed", "track", "vs", "squawk",
+}
+DEV_AIRCRAFT_LABEL_FIELDS = {"altitude_factor", "altitude_offset"}
+SUPPORTED_GEOID_MODELS = ["egm96-15", "egm96-5", "egm2008-5", "egm2008-2_5", "egm2008-1"]
 QUICK_VECTOR_LAYERS = (
     "ne_10m_admin_0_boundary_lines_land",
     "ne_10m_lakes",
@@ -122,6 +132,7 @@ DEFAULT_WEB_CONFIG = {
     "ils_length_nm": "10",
     "aircraft_label_color": "aircraft",
     "aircraft_label_size": "medium",
+    "aircraft_label_3d_mode": "fade",
     "unit_distance": "km",
     "unit_speed": "kt",
     "unit_altitude": "ft",
@@ -135,6 +146,7 @@ DEFAULT_WEB_CONFIG = {
     "show_event_range_ring": True,
     "show_event_aircraft_links": True,
     "active_glideslopes": [],
+    "show_dev_options": False,
 }
 
 
@@ -167,6 +179,16 @@ def safe_int(value, fallback):
         return fallback
 
 
+def installed_geoid_models():
+    models = []
+    for model in SUPPORTED_GEOID_MODELS:
+        for path in tf._candidate_geoid_paths(model):
+            if Path(path).is_file():
+                models.append({"model": model, "path": str(path)})
+                break
+    return models
+
+
 def load_web_config():
     config = DEFAULT_WEB_CONFIG.copy()
     try:
@@ -182,7 +204,7 @@ def load_web_config():
         config["visual_style"] = "cwp_classic"
     if config["visual_style"] not in {"current", "desktop", "cwp_classic", "cwp_approach", "cwp_enroute"}:
         config["visual_style"] = "cwp_classic"
-    allowed_fields = {"callsign", "icao", "distance", "altitude", "speed", "track", "vs", "squawk"}
+    allowed_fields = AIRCRAFT_LABEL_FIELDS
     if not isinstance(config.get("aircraft_label_fields"), list):
         config["aircraft_label_fields"] = DEFAULT_WEB_CONFIG["aircraft_label_fields"][:]
     else:
@@ -213,6 +235,8 @@ def load_web_config():
         config["aircraft_label_color"] = "aircraft"
     if config.get("aircraft_label_size") not in {"small", "medium", "large"}:
         config["aircraft_label_size"] = "medium"
+    if config.get("aircraft_label_3d_mode") not in {"fade", "avoid"}:
+        config["aircraft_label_3d_mode"] = "fade"
     if config["unit_distance"] not in {"km", "nm", "mi"}:
         config["unit_distance"] = "km"
     if config["unit_speed"] not in {"kt", "kmh", "mph"}:
@@ -233,6 +257,7 @@ def load_web_config():
     config["show_event_aircraft_links"] = bool(config.get("show_event_aircraft_links", True))
     config["show_active_full_history"] = bool(config.get("show_active_full_history", False))
     config["show_grounded_aircraft"] = bool(config.get("show_grounded_aircraft", False))
+    config["show_dev_options"] = bool(config.get("show_dev_options", False))
     if not isinstance(config.get("active_glideslopes"), list):
         config["active_glideslopes"] = []
     config["terrain_display_dataset"] = "all"
@@ -247,9 +272,34 @@ def save_web_config(config):
     return clean
 
 
+def visible_aircraft_label_fields(config):
+    fields = ["callsign", "icao", "distance", "altitude", "corrected_alt_asl", "speed", "track", "vs", "squawk"]
+    if bool(config.get("gps_altitude_correction_enabled", False)):
+        fields[5:5] = ["altitude_factor", "altitude_offset"]
+    return fields
+
+
+def filtered_web_config_for_runtime(web_config, config):
+    if bool(config.get("gps_altitude_correction_enabled", False)):
+        return web_config
+    filtered = web_config.copy()
+    filtered["aircraft_label_fields"] = [
+        field for field in filtered.get("aircraft_label_fields", [])
+        if field not in DEV_AIRCRAFT_LABEL_FIELDS
+    ] or DEFAULT_WEB_CONFIG["aircraft_label_fields"][:]
+    filtered["aircraft_label_lines"] = [
+        [field for field in line if field not in DEV_AIRCRAFT_LABEL_FIELDS]
+        for line in filtered.get("aircraft_label_lines", [])
+        if isinstance(line, list)
+    ]
+    filtered["aircraft_label_lines"] = [line for line in filtered["aircraft_label_lines"] if line] or DEFAULT_WEB_CONFIG["aircraft_label_lines"][:]
+    return filtered
+
+
 def public_config():
     config = tf.load_config(tf.config_file_full_path)
-    web_config = load_web_config()
+    web_config = filtered_web_config_for_runtime(load_web_config(), config)
+    local_geoids = installed_geoid_models()
     return {
         "config": config,
         "web": web_config,
@@ -265,6 +315,7 @@ def public_config():
                 "dump1090 / dump1090-mutability / readsb or another SBS/BaseStation decoder",
                 "RTL-SDR / rtl-sdr tools for RTL2832U receivers",
                 "Skyfield astronomy and ephemeris calculations",
+                "Optional EGM96/EGM2008 geoid grids from GeographicLib/NGA",
                 "NumPy, pyshp, and Shapely geospatial processing",
                 "Tailscale and usbipd-win are optional for remote WSL access",
             ],
@@ -279,18 +330,21 @@ def public_config():
                 for key, value in tf.VECTOR_LAYER_CONFIGS.items()
             },
             "visual_styles": ["current", "desktop", "cwp_classic", "cwp_approach", "cwp_enroute"],
-            "aircraft_label_fields": ["callsign", "icao", "distance", "altitude", "speed", "track", "vs", "squawk"],
+            "aircraft_label_fields": visible_aircraft_label_fields(config),
             "aircraft_label_line_numbers": ["1", "2", "3", "4"],
             "ils_styles": ["atc", "desktop", "minimal"],
             "ils_lengths_nm": ["5", "7", "10", "15"],
             "aircraft_label_colors": ["aircraft", "green"],
             "aircraft_label_sizes": ["small", "medium", "large"],
+            "aircraft_label_3d_modes": ["fade", "avoid"],
             "unit_distances": ["km", "nm", "mi"],
             "unit_speeds": ["kt", "kmh", "mph"],
             "unit_altitudes": ["ft", "m"],
             "aircraft_refresh_intervals": ["realtime", "1", "2", "5"],
             "trajectory_minutes": [0.5, 1, 1.5, 2, 3, 5, 8, 10],
             "trajectory_display_modes": ["altitude", "points"],
+            "geoid_models": [item["model"] for item in local_geoids],
+            "installed_geoids": local_geoids,
         },
         "requires_restart_for": ["host", "port", "device_index", "gain"],
     }
@@ -306,6 +360,8 @@ def coerce_config_value(key, value, current):
         "show_velocity_vector",
         "show_geo_vectors",
         "show_event_range_ring",
+        "geoid_correction_enabled",
+        "gps_altitude_correction_enabled",
     }
     float_keys = {
         "lat",
@@ -323,6 +379,10 @@ def coerce_config_value(key, value, current):
         "history_minutes",
         "trajectory_minutes",
         "velocity_vector_minutes",
+        "alt_correction_manual_temp_c",
+        "alt_correction_manual_qnh_hpa",
+        "metar_max_airport_km",
+        "dump1090_json_interval_sec",
     }
     int_keys = {"port", "device_index", "max_range_rings"}
     list_keys = {"show_airport_types", "show_navaid_types"}
@@ -341,10 +401,10 @@ def coerce_config_value(key, value, current):
             return current.get(key, {})
         return {layer: bool(value.get(layer, False)) for layer in tf.VECTOR_LAYER_CONFIGS}
     if key == "aircraft_label_fields":
-        allowed_fields = {"callsign", "icao", "distance", "altitude", "speed", "track", "vs", "squawk"}
+        allowed_fields = AIRCRAFT_LABEL_FIELDS
         return [str(item) for item in value if str(item) in allowed_fields] if isinstance(value, list) else current.get(key, DEFAULT_WEB_CONFIG["aircraft_label_fields"])
     if key == "aircraft_label_lines":
-        allowed_fields = {"callsign", "icao", "distance", "altitude", "speed", "track", "vs", "squawk"}
+        allowed_fields = AIRCRAFT_LABEL_FIELDS
         if not isinstance(value, list):
             return current.get(key, DEFAULT_WEB_CONFIG["aircraft_label_lines"])
         lines = []
@@ -366,7 +426,11 @@ def coerce_config_value(key, value, current):
     if key == "trajectory_minutes":
         parsed = finite_float(value, current.get(key, 2.0))
         return parsed if parsed is not None and parsed > 0 else current.get(key, 2.0)
-    if key in {"host", "gain", "range_ring_spacing_nm_str"}:
+    if key == "geoid_model":
+        value = str(value)
+        installed = {item["model"] for item in installed_geoid_models()}
+        return value if value in installed else current.get(key, "egm96-15")
+    if key in {"host", "gain", "range_ring_spacing_nm_str", "alt_correction_mode", "dump1090_json_url", "geoid_data_path"}:
         return str(value)
     return current.get(key, value)
 
@@ -425,6 +489,25 @@ def apply_runtime_config(config, web_config=None, reload_geodata=True):
     tf.VELOCITY_VECTOR_SECONDS = tf.VELOCITY_VECTOR_MINUTES * 60.0
     tf.SHOW_VELOCITY_VECTOR = config["show_velocity_vector"]
     tf.VECTOR_LAYERS_VISIBILITY = config["vector_layers_visibility"].copy()
+    old_mode = tf.ALT_CORRECTION_MODE
+    tf.ALT_CORRECTION_MODE = config.get("alt_correction_mode", "metar")
+    tf.ALT_CORRECTION_MANUAL_TEMP_C = config.get("alt_correction_manual_temp_c", 15.0)
+    tf.ALT_CORRECTION_MANUAL_QNH_HPA = config.get("alt_correction_manual_qnh_hpa", 1013.25)
+    tf.METAR_MAX_AIRPORT_KM = config.get("metar_max_airport_km", 100.0)
+    old_geoid = (tf.GEOID_CORRECTION_ENABLED, tf.GEOID_MODEL, tf.GEOID_DATA_PATH)
+    tf.GEOID_CORRECTION_ENABLED = bool(config.get("geoid_correction_enabled", False))
+    tf.GEOID_MODEL = str(config.get("geoid_model", "egm96-15") or "egm96-15")
+    tf.GEOID_DATA_PATH = str(config.get("geoid_data_path", "") or "").strip()
+    tf.GPS_ALTITUDE_CORRECTION_ENABLED = bool(config.get("gps_altitude_correction_enabled", False))
+    if old_geoid != (tf.GEOID_CORRECTION_ENABLED, tf.GEOID_MODEL, tf.GEOID_DATA_PATH):
+        tf.load_geoid_grid(force=True)
+    tf.DUMP1090_JSON_URL = str(os.environ.get("ADSB_DUMP1090_JSON_URL", config.get("dump1090_json_url", tf.DEFAULT_DUMP1090_JSON_URL)) or "").strip()
+    try:
+        tf.DUMP1090_JSON_INTERVAL_SEC = max(0.2, min(10.0, float(os.environ.get("ADSB_DUMP1090_JSON_INTERVAL_SEC", config.get("dump1090_json_interval_sec", tf.DEFAULT_DUMP1090_JSON_INTERVAL_SEC)) or tf.DEFAULT_DUMP1090_JSON_INTERVAL_SEC)))
+    except (TypeError, ValueError):
+        tf.DUMP1090_JSON_INTERVAL_SEC = tf.DEFAULT_DUMP1090_JSON_INTERVAL_SEC
+    if tf.ALT_CORRECTION_MODE == "metar" and old_mode != "metar":
+        tf.METAR_REFRESH_EVENT.set()  # immediate fetch when switching to METAR mode
     history_maxlen = tf.aircraft_history_maxlen()
     with tf.lock:
         for ac in tf.aircraft_dict.values():
@@ -472,7 +555,7 @@ def update_config_from_payload(payload):
             for key in DEFAULT_WEB_CONFIG:
                 if key in payload["web"]:
                     old_value = web_updated.get(key)
-                    if key in {"show_geo_vectors", "show_background_grid", "show_terrain_contours", "show_event_range_ring", "show_event_aircraft_links", "show_active_full_history", "show_grounded_aircraft"}:
+                    if key in {"show_geo_vectors", "show_background_grid", "show_terrain_contours", "show_event_range_ring", "show_event_aircraft_links", "show_active_full_history", "show_grounded_aircraft", "show_dev_options"}:
                         web_updated[key] = bool(payload["web"][key])
                     elif key == "active_glideslopes":
                         web_updated[key] = payload["web"][key] if isinstance(payload["web"][key], list) else []
@@ -490,6 +573,9 @@ def update_config_from_payload(payload):
                         web_updated[key] = str(payload["web"][key])
                     if web_updated.get(key) != old_value:
                         web_changed = True
+            if not bool(web_updated.get("show_dev_options", False)):
+                updated["gps_altitude_correction_enabled"] = False
+                updated["geoid_correction_enabled"] = False
             save_web_config(web_updated)
         else:
             web_updated = None
@@ -505,32 +591,6 @@ def update_config_from_payload(payload):
     return updated
 
 
-def windows_location_snapshot():
-    powershell = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-    if not os.path.exists(powershell):
-        raise RuntimeError("Windows PowerShell is not available from this WSL environment")
-    script = (
-        "Add-Type -AssemblyName System.Device;"
-        "$w=New-Object System.Device.Location.GeoCoordinateWatcher([System.Device.Location.GeoPositionAccuracy]::High);"
-        "$w.Start();"
-        "$deadline=(Get-Date).AddSeconds(20);"
-        "while($w.Status -eq 'Initializing' -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 250};"
-        "$loc=$w.Position.Location;"
-        "if($loc.IsUnknown){throw 'Windows location is unavailable or permission is denied'};"
-        "$alt=$null;"
-        "if(-not [double]::IsNaN($loc.Altitude)){ $alt=$loc.Altitude };"
-        "$obj=[ordered]@{lat=$loc.Latitude;lon=$loc.Longitude;alt_m=$alt;horizontal_accuracy_m=$loc.HorizontalAccuracy;vertical_accuracy_m=$loc.VerticalAccuracy};"
-        "$obj | ConvertTo-Json -Compress"
-    )
-    result = subprocess.run(
-        [powershell, "-NoProfile", "-Command", script],
-        capture_output=True,
-        text=True,
-        timeout=25,
-    )
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "Windows location failed").strip())
-    return json.loads(result.stdout)
 
 
 def elevation_cache_key(lat, lon):
@@ -1372,6 +1432,210 @@ def start_high_vector_load():
     threading.Thread(target=_worker, daemon=True, name="HighVectorLoader").start()
 
 
+def _parse_metar_time(raw, now=None):
+    """Infer a UTC observation timestamp from the DDHHMMZ token in a METAR."""
+    import re
+    if not raw:
+        return None
+    if now is None:
+        now = datetime.now(timezone.utc)
+    m = re.search(r'\b(\d{2})(\d{2})(\d{2})Z\b', raw)
+    if not m:
+        return None
+    day, hour, minute = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    candidates = []
+    for month_delta in (-1, 0, 1):
+        year = now.year
+        month = now.month + month_delta
+        while month < 1:
+            month += 12
+            year -= 1
+        while month > 12:
+            month -= 12
+            year += 1
+        try:
+            candidates.append(datetime(year, month, day, hour, minute, tzinfo=timezone.utc))
+        except ValueError:
+            continue
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: abs((now - item).total_seconds()))
+
+
+def _parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _fetch_metar(icao, timeout=20):
+    """Fetch latest METAR from aviationweather.gov. Returns dict or None."""
+    url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=2"
+    try:
+        req = Request(url, headers={"User-Agent": "ADSBTransitPredictor/1.5"})
+        with urlopen(req, timeout=timeout) as resp:
+            if resp.status == 204:
+                return None
+            text = resp.read().decode("utf-8", errors="ignore")
+            rows = json.loads(text) if text.strip() else []
+            if not rows:
+                return None
+            row = rows[0]
+            raw = row.get("rawOb") or row.get("raw_text") or row.get("raw") or ""
+            temp_c, qnh_hpa = _parse_metar_values(raw)
+            if row.get("temp") is not None:
+                try:
+                    temp_c = float(row.get("temp"))
+                except (TypeError, ValueError):
+                    pass
+            if row.get("altim") is not None:
+                try:
+                    altim = float(row.get("altim"))
+                    qnh_hpa = round(altim * 33.8639, 1) if altim < 100.0 else round(altim, 1)
+                except (TypeError, ValueError):
+                    pass
+            observed_at = (
+                _parse_iso_datetime(row.get("obsTime"))
+                or _parse_iso_datetime(row.get("reportTime"))
+                or _parse_metar_time(raw)
+            )
+            return {"raw": raw, "temp_c": temp_c, "qnh_hpa": qnh_hpa, "observed_at": observed_at}
+    except Exception as exc:
+        print(f"[metar] Fetch error for {icao}: {exc}")
+        return None
+
+
+def _parse_metar_values(raw):
+    """Extract (temp_c, qnh_hpa) from raw METAR string. Returns (None, None) on failure."""
+    import re
+    if not raw:
+        return None, None
+    temp_c, qnh_hpa = None, None
+    m = re.search(r'\b(M?\d{2})/M?\d{2}\b', raw)
+    if m:
+        t = m.group(1)
+        temp_c = -(int(t[1:])) if t.startswith('M') else int(t)
+    m = re.search(r'\bQ(\d{4})\b', raw)
+    if m:
+        qnh_hpa = int(m.group(1))
+    else:
+        m = re.search(r'\bA(\d{4})\b', raw)
+        if m:
+            qnh_hpa = round(int(m.group(1)) / 100.0 * 33.8639)
+    return temp_c, qnh_hpa
+
+
+def _refresh_metar_once(force=False):
+    """Single METAR fetch attempt. Updates tf.METAR_STATE. Returns True on success."""
+    now = datetime.now(timezone.utc)
+    apt, dist_km = tf.find_nearest_metar_airport(
+        tf.USER_LAT, tf.USER_LON, max_km=tf.METAR_MAX_AIRPORT_KM
+    )
+    if apt is None:
+        with tf.METAR_LOCK:
+            tf.METAR_STATE.update({
+                "valid": False, "warning": None, "fetched_at": now, "observed_at": None, "age_sec": None,
+                "error": f"No airport within {tf.METAR_MAX_AIRPORT_KM:.0f} km",
+            })
+        print(f"[metar] No airport within {tf.METAR_MAX_AIRPORT_KM:.0f} km")
+        return False
+    icao = apt.get("ident", "")
+    min_interval = METAR_FORCE_MIN_FETCH_INTERVAL_SEC if force else METAR_MIN_FETCH_INTERVAL_SEC
+    mono_now = time.monotonic()
+    with METAR_FETCH_LOCK:
+        last_icao = METAR_LAST_FETCH_ATTEMPT.get("icao")
+        last_mono = float(METAR_LAST_FETCH_ATTEMPT.get("monotonic") or 0.0)
+        if last_icao == icao and mono_now - last_mono < min_interval:
+            return bool(tf.METAR_STATE.get("valid"))
+        METAR_LAST_FETCH_ATTEMPT["icao"] = icao
+        METAR_LAST_FETCH_ATTEMPT["monotonic"] = mono_now
+    metar = _fetch_metar(icao)
+    raw = metar.get("raw") if metar else None
+    temp_c = metar.get("temp_c") if metar else None
+    qnh_hpa = metar.get("qnh_hpa") if metar else None
+    observed_at = metar.get("observed_at") if metar else None
+    if observed_at is None and raw:
+        observed_at = _parse_metar_time(raw, now=now)
+    age_sec = (now - observed_at).total_seconds() if observed_at is not None else None
+    too_old = age_sec is not None and age_sec > tf.METAR_MAX_AGE_SEC
+    warning = None
+    if age_sec is not None and tf.METAR_WARN_AGE_SEC < age_sec <= tf.METAR_MAX_AGE_SEC:
+        warning = "METAR is older than 90 minutes; still using it as degraded fallback"
+    valid = raw is not None and temp_c is not None and qnh_hpa is not None and not too_old
+    error = None
+    if not valid:
+        if too_old:
+            error = "METAR expired (>120 min old); altitude correction disabled until refreshed or manual values are used"
+        else:
+            error = f"Could not fetch/parse METAR for {icao}"
+    with tf.METAR_LOCK:
+        previous_raw = tf.METAR_STATE.get("raw")
+        tf.METAR_STATE.update({
+            "airport_icao": icao,
+            "airport_name": apt.get("name", ""),
+            "airport_dist_km": dist_km,
+            "raw": raw,
+            "temp_c": temp_c,
+            "qnh_hpa": qnh_hpa,
+            "observed_at": observed_at,
+            "fetched_at": now,
+            "age_sec": round(age_sec) if age_sec is not None else None,
+            "valid": valid,
+            "warning": warning,
+            "error": error,
+        })
+    if valid and raw != previous_raw:
+        print(f"[metar] {icao} ({dist_km} km): {raw}")
+    elif not valid:
+        print(f"[metar] Failed for {icao}: raw={raw!r}")
+    return valid
+
+
+def metar_worker():
+    """Always-running background thread. Keeps METAR fresh when mode='metar'.
+    Continues retrying when stale or failed; stays dormant but alive in other modes."""
+    REFRESH_SEC = 30 * 60
+    RETRY_SEC   =  5 * 60
+    POLL_SEC    = 30
+
+    while True:
+        triggered = tf.METAR_REFRESH_EVENT.wait(timeout=POLL_SEC)
+        if triggered:
+            tf.METAR_REFRESH_EVENT.clear()
+
+        if tf.ALT_CORRECTION_MODE != "metar":
+            continue
+
+        try:
+            # Update age and mark stale if expired
+            with tf.METAR_LOCK:
+                observed_at = tf.METAR_STATE.get("observed_at")
+                was_valid  = tf.METAR_STATE.get("valid", False)
+            if observed_at is not None:
+                age_sec = (datetime.now(timezone.utc) - observed_at).total_seconds()
+                with tf.METAR_LOCK:
+                    tf.METAR_STATE["age_sec"] = round(age_sec)
+                    if tf.METAR_WARN_AGE_SEC < age_sec <= tf.METAR_MAX_AGE_SEC and tf.METAR_STATE["valid"]:
+                        tf.METAR_STATE["warning"] = "METAR is older than 90 minutes; still using it as degraded fallback"
+                        tf.METAR_STATE["error"] = None
+                    elif age_sec > tf.METAR_MAX_AGE_SEC and tf.METAR_STATE["valid"]:
+                        tf.METAR_STATE["valid"] = False
+                        tf.METAR_STATE["warning"] = None
+                        tf.METAR_STATE["error"] = "METAR expired (>120 min old); altitude correction disabled until refreshed or manual values are used"
+            else:
+                age_sec = float("inf")
+
+            # Fetch if triggered, or if overdue
+            due_in = REFRESH_SEC if was_valid else RETRY_SEC
+            if triggered or age_sec >= due_in:
+                _refresh_metar_once(force=triggered)
+        except Exception as exc:
+            print(f"[metar] Worker error: {exc}")
+
+
 def start_processing_threads(start_dump1090=False):
     global THREADS_STARTED
     if THREADS_STARTED:
@@ -1388,6 +1652,7 @@ def start_processing_threads(start_dump1090=False):
 
     init_ephemeris()
     init_geodata()
+    tf.load_geoid_grid(force=True)
 
     workers = [
         threading.Thread(target=tf.start_listener, daemon=True, name="WebListener"),
@@ -1395,7 +1660,10 @@ def start_processing_threads(start_dump1090=False):
         threading.Thread(target=tf.clean_expired_events, daemon=True, name="WebEventCleaner"),
         threading.Thread(target=event_cache_worker, daemon=True, name="WebEventCache"),
         threading.Thread(target=map_cache_worker, daemon=True, name="WebMapCache"),
+        threading.Thread(target=metar_worker, daemon=True, name="METARUpdater"),
     ]
+    if tf.GPS_ALTITUDE_CORRECTION_ENABLED and tf.DUMP1090_JSON_URL:
+        workers.append(threading.Thread(target=tf.dump1090_json_listener, daemon=True, name="Dump1090JsonListener"))
     if tf.eph:
         workers.append(
             threading.Thread(
@@ -1407,6 +1675,8 @@ def start_processing_threads(start_dump1090=False):
     for worker in workers:
         worker.start()
     MAP_CACHE_EVENT.set()
+    if tf.ALT_CORRECTION_MODE == "metar":
+        tf.METAR_REFRESH_EVENT.set()
     THREADS_STARTED = True
 
 
@@ -1453,6 +1723,18 @@ def aircraft_snapshot(range_km, center_lat, center_lon, web_config=None, viewpor
         distance_km = tf.haversine(tf.USER_LAT, tf.USER_LON, lat, lon) if has_position else None
         view_distance_km = tf.haversine(center_lat, center_lon, lat, lon) if has_position else None
         visible = has_position and min_lat <= lat <= max_lat and min_lon <= lon <= max_lon
+        corrected_alt_asl = None
+        altitude_factor = None
+        altitude_offset = None
+        if ac.get("altitude") is not None:
+            try:
+                altitude_factor = float(ac.get("geometry_altitude_factor", 1.0) or 1.0)
+                altitude_offset = float(ac.get("geometry_altitude_offset_ft", 0.0) or 0.0)
+                corrected_alt_asl = tf.aircraft_geometry_altitude_ft(ac, ac.get("altitude"))
+            except (TypeError, ValueError):
+                altitude_factor = None
+                altitude_offset = None
+                corrected_alt_asl = None
         history = []
         for point in list(ac.get("history", [])):
             t, hlat, hlon, halt = point
@@ -1464,8 +1746,30 @@ def aircraft_snapshot(range_km, center_lat, center_lon, web_config=None, viewpor
                     "lat": hlat,
                     "lon": hlon,
                     "altitude": halt,
+                    "corrected_alt_asl": tf.aircraft_geometry_altitude_ft(ac, halt),
                 }
             )
+        if has_position and ac.get("altitude") is not None:
+            append_current = True
+            if history:
+                try:
+                    last = history[-1]
+                    last_time = datetime.fromisoformat(str(last.get("time")).replace("Z", "+00:00"))
+                    last_dist = tf.haversine(last.get("lat"), last.get("lon"), lat, lon)
+                    append_current = (now - last_time).total_seconds() >= 0.5 or last_dist >= 0.01
+                except Exception:
+                    append_current = True
+            if append_current:
+                history.append(
+                    {
+                        "time": now.isoformat(),
+                        "lat": lat,
+                        "lon": lon,
+                        "altitude": ac.get("altitude"),
+                        "corrected_alt_asl": corrected_alt_asl,
+                        "extrapolated": True,
+                    }
+                )
         path = []
         if all(ac.get(k) is not None for k in ("lat", "lon", "altitude", "speed", "track", "vs")):
             for dt in range(0, int(vector_seconds) + 1, 5):
@@ -1480,7 +1784,13 @@ def aircraft_snapshot(range_km, center_lat, center_lon, web_config=None, viewpor
                 )
                 if plat is None:
                     break
-                path.append({"dt": dt, "lat": plat, "lon": plon, "altitude": palt})
+                path.append({
+                    "dt": dt,
+                    "lat": plat,
+                    "lon": plon,
+                    "altitude": palt,
+                    "corrected_alt_asl": tf.aircraft_geometry_altitude_ft(ac, palt),
+                })
 
         aircraft.append(
             {
@@ -1489,6 +1799,9 @@ def aircraft_snapshot(range_km, center_lat, center_lon, web_config=None, viewpor
                 "lat": lat,
                 "lon": lon,
                 "altitude": ac.get("altitude"),
+                "corrected_alt_asl": corrected_alt_asl,
+                "altitude_factor": altitude_factor,
+                "altitude_offset": altitude_offset,
                 "speed": ac.get("speed"),
                 "track": ac.get("track"),
                 "vs": ac.get("vs"),
@@ -1507,7 +1820,12 @@ def aircraft_snapshot(range_km, center_lat, center_lon, web_config=None, viewpor
                 "visible": visible,
             }
         )
-    aircraft.sort(key=lambda item: (item["distance_km"] is None, item["distance_km"] or 999999))
+    aircraft.sort(
+        key=lambda item: (
+            item["view_distance_km"] is None and item["distance_km"] is None,
+            item["view_distance_km"] if item["view_distance_km"] is not None else item["distance_km"] or 999999,
+        )
+    )
     return aircraft
 
 
@@ -2381,7 +2699,8 @@ def map_cache_worker():
 
 
 def build_state(query):
-    web_config = load_web_config()
+    config = tf.load_config(tf.config_file_full_path)
+    web_config = filtered_web_config_for_runtime(load_web_config(), config)
     detail = query.get("detail", ["full"])[0]
     if detail not in {"full", "light"}:
         detail = "full"
@@ -2447,6 +2766,8 @@ def build_state(query):
         "settings": {
             "dump1090_host": tf.HOST,
             "dump1090_port": tf.PORT,
+            "dump1090_json_url": tf.DUMP1090_JSON_URL,
+            "geoid": tf.GEOID_STATUS.copy(),
             "connected": tf.DUMP1090_CONNECTED,
             "user": {"lat": tf.USER_LAT, "lon": tf.USER_LON, "alt_m": tf.USER_ALT},
             "center": {"lat": center_lat, "lon": center_lon},
@@ -2551,12 +2872,6 @@ class WebHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/config":
             self.send_json(200, public_config())
             return
-        if parsed.path == "/api/location/windows":
-            try:
-                self.send_json(200, {"ok": True, "location": windows_location_snapshot()})
-            except Exception as exc:
-                self.send_json(400, {"ok": False, "error": str(exc)})
-            return
         if parsed.path == "/api/elevation":
             self.send_json(410, {"ok": False, "error": "Terrain and elevation API is disabled in this release build."})
             return
@@ -2564,8 +2879,25 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True, "connected": tf.DUMP1090_CONNECTED})
             return
 
+        if parsed.path == "/api/metar":
+            with tf.METAR_LOCK:
+                state = tf.METAR_STATE.copy()
+            fetched_at = state.get("fetched_at")
+            if fetched_at is not None:
+                state["fetched_at"] = fetched_at.isoformat()
+            observed_at = state.get("observed_at")
+            if observed_at is not None:
+                state["age_sec"] = round((datetime.now(timezone.utc) - observed_at).total_seconds())
+                state["observed_at"] = observed_at.isoformat()
+            state["mode"] = tf.ALT_CORRECTION_MODE
+            state["manual_temp_c"] = tf.ALT_CORRECTION_MANUAL_TEMP_C
+            state["manual_qnh_hpa"] = tf.ALT_CORRECTION_MANUAL_QNH_HPA
+            state["max_airport_km"] = tf.METAR_MAX_AIRPORT_KM
+            self.send_json(200, state)
+            return
+
         if parsed.path.startswith("/assets/"):
-            rel_path = parsed.path.removeprefix("/assets/")
+            rel_path = parsed.path[len("/assets/"):]
             candidate = (ASSETS_DIR / rel_path).resolve()
             if not str(candidate).startswith(str(ASSETS_DIR.resolve())) or not candidate.is_file():
                 self.send_json(404, {"error": "not found"})
@@ -2596,7 +2928,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path not in {"/api/config", "/api/interaction"}:
+        if parsed.path not in {"/api/config", "/api/interaction", "/api/metar"}:
             self.send_json(404, {"error": "not found"})
             return
         try:
@@ -2604,6 +2936,11 @@ class WebHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
             if parsed.path == "/api/interaction":
                 self.send_json(200, set_event_prediction_paused(payload.get("pause_events", False)))
+                return
+            if parsed.path == "/api/metar":
+                # Trigger immediate fetch in background worker, return instantly
+                tf.METAR_REFRESH_EVENT.set()
+                self.send_json(200, {"ok": True, "fetching": True})
                 return
             update_config_from_payload(payload)
             response = public_config()

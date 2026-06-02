@@ -6,10 +6,11 @@ if command -v readlink >/dev/null 2>&1; then
   _adsb_alias_script="$(readlink -f "${_adsb_alias_script}")"
 fi
 _adsb_alias_root="$(cd "$(dirname "${_adsb_alias_script}")/.." && pwd)"
+export PATH="${HOME}/.local/bin:${PATH}"
 
 adsb-web() (
   cd "${_adsb_alias_root}" || return
-  ADSB_WEB_HOST="${ADSB_WEB_HOST:-100.75.150.117}" ./scripts/start_adsb_web.sh "$@"
+  ./scripts/start_adsb_web.sh "$@"
 )
 
 adsb-doctor() (

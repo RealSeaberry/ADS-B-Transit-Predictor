@@ -37,6 +37,8 @@ The older Windows desktop release remains available from previous GitHub Release
 
 ## Download And Install
 
+Supported baseline: Python 3.8 or newer. Ubuntu 20.04+ / Debian 11+ / current Fedora, Arch, or openSUSE are recommended. Ubuntu 18.04's default Python 3.6 is too old for this release.
+
 ```bash
 mkdir -p ~/adsb-transit && cd ~/adsb-transit
 wget -O ADS-B-Transit-Predictor-linux-web.tar.gz "https://github.com/RealSeaberry/ADS-B-Transit-Predictor/releases/latest/download/ADS-B-Transit-Predictor-linux-web.tar.gz"
@@ -69,7 +71,7 @@ The HTTPS certificate is self-signed. Accept the browser warning on first visit.
 * creates `~/.config/adsb-transit/adsb-web.env`
 * registers the `adsb-web` launcher in your shell startup file
 * registers the `adsb-doctor` diagnostics command
-* can install `dump1090`, `readsb`, or only the Web UI dependencies depending on your receiver setup
+* tries to install a packaged ADS-B decoder when one is available from your Linux distribution
 
 Useful installer overrides:
 
@@ -77,10 +79,11 @@ Useful installer overrides:
 ADSB_SKIP_SYSTEM=1 ./scripts/install_linux.sh
 ADSB_SKIP_PIP=1 ./scripts/install_linux.sh
 ADSB_SHELL_RC=~/.bashrc ./scripts/install_linux.sh
-ADSB_INSTALL_DECODER=readsb ./scripts/install_linux.sh
 ADSB_INSTALL_DECODER=none ./scripts/install_linux.sh
 ADSB_INSTALL_RTL_UDEV=1 ./scripts/install_linux.sh
 ```
+
+Altitude correction defaults to METAR mode. On startup the server immediately tries to fetch the nearest valid METAR; if METAR is unavailable or expired, predictions continue with raw barometric altitude. EGM/geoid data is not installed by the v1.4.1 installer. The Web UI only shows EGM options when local geoid files are already present.
 
 ## Recommended First Run
 
@@ -116,6 +119,18 @@ adsb-doctor
 
 Include the output when reporting install, SDR, decoder, WSL, or port issues. It avoids guesswork and helps identify whether the problem is Python dependencies, USB forwarding, decoder startup, or the SBS feed.
 
+## Receiver Access: Native Linux vs WSL
+
+Native Linux does not require `usbipd-win`. If `dump1090`, `dump1090-mutability`, `readsb`, or another SBS/BaseStation decoder is already listening on `127.0.0.1:30003`, `adsb-web` can use that local data stream directly:
+
+```bash
+adsb-web
+# or explicitly:
+ADSB_DECODER_MODE=external adsb-web
+```
+
+Use `usbipd-win` only when the SDR receiver is physically plugged into Windows and the server runs inside WSL.
+
 ## Configure usbipd For Windows + WSL
 
 If the SDR receiver is plugged into Windows and the server runs in WSL, pass the USB device through with `usbipd`.
@@ -150,7 +165,7 @@ usbipd attach --wsl --busid <busid>
 ADSB_USB_BUSID=<busid> adsb-web
 ```
 
-Skip usbipd for native Linux or an already attached receiver:
+Skip usbipd for an already attached WSL receiver. Native Linux skips usbipd automatically:
 
 ```bash
 ADSB_SKIP_USBIPD=1 adsb-web
@@ -167,19 +182,20 @@ rtl_test -t
 
 ## SDR And Decoder Compatibility
 
-The Web UI does not require a specific SDR. It reads SBS/BaseStation messages from `dump1090`, `readsb`, or any compatible decoder on the configured host and port.
+The Web UI does not require a specific SDR. It reads SBS/BaseStation messages from `dump1090-fa`, `dump1090`, `readsb`, or any compatible decoder on the configured host and port.
 
 Recommended receiver paths:
 
 | Receiver setup | Recommended mode |
 | --- | --- |
-| RTL-SDR / RTL2832U on the same Linux/WSL machine | default `adsb-web` |
-| Existing local dump1090/readsb already listening on SBS | `ADSB_DECODER_MODE=external adsb-web` |
+| Native Linux, existing local dump1090/readsb on SBS `127.0.0.1:30003` | default `adsb-web`, or `ADSB_DECODER_MODE=external adsb-web` |
+| Native Linux, RTL-SDR / RTL2832U with no decoder running | default `adsb-web` with packaged `dump1090-mutability` / `dump1090` when available |
+| WSL, receiver plugged into Windows | configure `usbipd`, then default `adsb-web` |
 | Remote decoder on another computer | set SBS Host/Port in Settings, then `ADSB_DECODER_MODE=external adsb-web` |
 | Airspy / SDRplay / Beast / custom decoder | set `ADSB_DECODER_CMD` in `~/.config/adsb-transit/adsb-web.env` |
 | No receiver yet, demo UI only | `ADSB_DECODER_MODE=none adsb-web` |
 
-Default mode starts local `dump1090-mutability` or `dump1090`, which is intended for RTL-SDR/RTL2832U devices:
+Default mode first checks whether the SBS port is already listening. If so, it leaves the existing decoder alone and starts only the Web UI. If no SBS feed is listening, it tries to start a local decoder, preferring `dump1090-mutability`, then `dump1090`, then `dump1090-fa` if the user has installed it separately.
 
 ```bash
 adsb-web
@@ -195,7 +211,17 @@ sudo apt-get update
 sudo apt-get install -y dump1090-mutability rtl-sdr
 ```
 
-The current installer attempts this automatically. If your distribution still does not provide `dump1090-mutability`, use an existing decoder or custom decoder mode instead of the default RTL-SDR path.
+The installer attempts this automatically. If your distribution still does not provide `dump1090-mutability`, use an existing decoder, install a decoder manually, or use custom decoder mode instead.
+
+If you already run `dump1090-fa` or `readsb` with `aircraft.json` enabled, set the optional JSON URL manually:
+
+```bash
+ADSB_DUMP1090_JSON_URL='http://127.0.0.1/dump1090-fa/data/aircraft.json' adsb-web
+# or, for decoders exposing JSON directly:
+ADSB_DUMP1090_JSON_URL='http://127.0.0.1:8080/data/aircraft.json' adsb-web
+```
+
+When JSON `alt_geom` is unavailable, the per-aircraft correction factor stays at its last value, or `1.0` if that aircraft has never reported geometric altitude. The app still falls back to the METAR/manual altitude correction path.
 
 Use an already running decoder, including a remote decoder, by setting the Web UI receiver host/port in Settings or `config.json`, then start only the Web UI stack:
 
@@ -209,7 +235,7 @@ Use a custom local decoder command when the SDR needs another decoder or device 
 ADSB_DECODER_CMD='readsb --device-type airspy --net --net-sbs-port 30003' adsb-web
 ```
 
-If automatic USB detection misses your receiver, pass the BUSID manually or override the matching expression:
+If WSL automatic USB detection misses your receiver, pass the BUSID manually or override the matching expression:
 
 ```bash
 ADSB_USB_BUSID=<busid> adsb-web

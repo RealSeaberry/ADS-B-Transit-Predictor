@@ -165,10 +165,33 @@ __pycache__/
 .idea/
 .vscode/
 *.DS_Store
-# External data — downloaded at install time, not tracked in source
-/data/
+# Ignore large map data files
 
-# Local runtime files
+
+# ... (Python, venv, build, dist 等)
+
+# Ignore large data assets
+*.bsp
+/data/map_vectors/
+!/data/map_vectors/
+!/data/map_vectors/gshhs_h_land/
+!/data/map_vectors/gshhs_h_land/GSHHS_h_L1.dbf
+!/data/map_vectors/gshhs_h_land/GSHHS_h_L1.prj
+!/data/map_vectors/gshhs_h_land/GSHHS_h_L1.shp
+!/data/map_vectors/gshhs_h_land/GSHHS_h_L1.shx
+
+# Ignore third-party binaries
 /dump1090/
+
+# Ignore generated/local data assets, with the packaged high-resolution map exception above.
+/data/*
+!/data/map_vectors/
+!/data/map_vectors/gshhs_h_land/
+!/data/map_vectors/gshhs_h_land/GSHHS_h_L1.dbf
+!/data/map_vectors/gshhs_h_land/GSHHS_h_L1.prj
+!/data/map_vectors/gshhs_h_land/GSHHS_h_L1.shp
+!/data/map_vectors/gshhs_h_land/GSHHS_h_L1.shx
+
+# Local Web UI settings, may contain private display or location preferences
 /web_ui_config.json
 /.web_certs/

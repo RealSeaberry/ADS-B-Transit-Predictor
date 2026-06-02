@@ -76,8 +76,6 @@ ADSB_HTTPS=0 adsb-web
 
 Browser GPS works on `localhost` or HTTPS. The default launcher uses HTTPS so GPS can work over Tailscale.
 
-For Windows + WSL, `Windows Location` reads the Windows location service through PowerShell. Enable Windows Location Services and allow desktop apps to access location.
-
 If browser/mobile altitude is missing, enter observer altitude manually in Settings.
 
 ## Map Data

@@ -2,6 +2,25 @@
 
 All notable user-facing changes are documented here.
 
+## 2026-06-01 - v1.4.1 Linux/WSL Compatibility Update
+
+### Added
+
+* Added optional EGM96/EGM2008 geoid correction for dump1090-fa `alt_geom`.
+  * Supports GeographicLib `.pgm` grids and the NGA EGM96 `WW15MGH.DAC` file.
+  * Converts WGS84 ellipsoid height to approximate MSL before computing per-aircraft altitude correction factors.
+  * The Settings UI shows EGM controls only when local geoid data files are present.
+* Added a top-level Dev settings switch. GPS altitude correction and EGM controls are hidden unless Dev is enabled.
+
+### Changed
+
+* Fixed the main altitude stability path for prediction and display.
+  * 2D/3D aircraft position and visible tracks use stable barometric altitude.
+  * Corrected altitude is available as a label field, but GPS/JSON altitude correction is isolated behind Dev options.
+  * METAR correction remains the normal fallback for event geometry without forcing unstable GPS altitude jumps into the map view.
+* Improved Linux/WSL installation and runtime stability across clean systems.
+* Improved compatibility with native Linux, WSL, and existing local ADS-B decoder setups.
+
 ## 2026-05-15 - Windows Controller Preview
 
 ### Added

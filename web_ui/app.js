@@ -1,163 +1,5 @@
 const canvas = document.getElementById("mapCanvas");
-let ctx = canvas.getContext("2d");
-
-// Offscreen cache for geographic background (vectors, runways, airports, navaids).
-// 2D mode: canvas is OVERSCAN_PX larger on every side, so panning reveals pre-rendered content
-// rather than the blank background. Only rebuilt when map parameters change or pan exceeds margin.
-const _OVERSCAN_PX = 300;       // CSS px of pre-rendered margin on each edge
-let _cacheOverscanPx = 0;       // active during _paintGeoToCache() to widen projection
-
-const _geoCache = {
-  canvas: null, ctx: null,
-  physW: 0, physH: 0,
-  overscanPx: 0,
-  rangeKm: null, centerLat: null, centerLon: null,
-  geoRef: null, paletteKey: null, viewMode: null,
-  scale: null, kmPerDegLon: null, kmPerDegLat: null,
-};
-
-function markMapInteracting(durationMs = 320) {
-  state.mapInteractionUntil = Math.max(state.mapInteractionUntil || 0, performance.now() + durationMs);
-}
-
-function _geoCacheValid() {
-  if (!_geoCache.canvas) return false;
-  const ratio = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  const overscan = state.viewMode === "2d" ? _OVERSCAN_PX : 0;
-  if (_geoCache.physW !== Math.floor((rect.width  + 2 * overscan) * ratio)) return false;
-  if (_geoCache.physH !== Math.floor((rect.height + 2 * overscan) * ratio)) return false;
-  if (_geoCache.rangeKm  !== state.rangeKm)  return false;
-  if (_geoCache.viewMode !== state.viewMode)  return false;
-  if (_geoCache.geoRef   !== activeGeodataForDrawing()) return false;
-  const pk = state.data?.settings?.web?.visual_style || state.web?.visual_style || "cwp_classic";
-  if (_geoCache.paletteKey !== pk) return false;
-  // 2D: valid while pan offset stays inside the pre-rendered overscan margin
-  if (state.viewMode === "2d" && _geoCache.scale && _geoCache.centerLat !== null) {
-    const center = state.center || state.data?.settings?.center || state.data?.settings?.user;
-    const dx = Math.abs((center?.lon ?? 0) - _geoCache.centerLon) * _geoCache.kmPerDegLon * _geoCache.scale;
-    const dy = Math.abs((center?.lat ?? 0) - _geoCache.centerLat) * _geoCache.kmPerDegLat * _geoCache.scale;
-    if (dx > _OVERSCAN_PX * 0.82 || dy > _OVERSCAN_PX * 0.82) return false;
-  }
-  return true;
-}
-
-function _paintGeoToCache(drawFn) {
-  const ratio = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
-  const overscan = state.viewMode === "2d" ? _OVERSCAN_PX : 0;
-  const physW = Math.floor((rect.width  + 2 * overscan) * ratio);
-  const physH = Math.floor((rect.height + 2 * overscan) * ratio);
-  if (!_geoCache.canvas || _geoCache.physW !== physW || _geoCache.physH !== physH) {
-    _geoCache.canvas = document.createElement("canvas");
-    _geoCache.canvas.width  = physW;
-    _geoCache.canvas.height = physH;
-    _geoCache.ctx = _geoCache.canvas.getContext("2d");
-  }
-  const realCtx = ctx;
-  ctx = _geoCache.ctx;
-  ctx.clearRect(0, 0, physW, physH);
-  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  _cacheOverscanPx = overscan;
-  try {
-    drawFn();
-  } finally {
-    ctx = realCtx;
-    _cacheOverscanPx = 0;
-  }
-  const center = state.center || state.data?.settings?.center || state.data?.settings?.user;
-  const pk = state.data?.settings?.web?.visual_style || state.web?.visual_style || "cwp_classic";
-  const latRad = (Math.PI / 180) * (center?.lat || 0);
-  _geoCache.rangeKm    = state.rangeKm;
-  _geoCache.centerLat  = center?.lat;
-  _geoCache.centerLon  = center?.lon;
-  _geoCache.geoRef     = activeGeodataForDrawing();
-  _geoCache.paletteKey = pk;
-  _geoCache.viewMode   = state.viewMode;
-  _geoCache.overscanPx = overscan;
-  _geoCache.physW      = physW;
-  _geoCache.physH      = physH;
-  _geoCache.scale      = Math.min(rect.width, rect.height) / (state.rangeKm * 2);
-  _geoCache.kmPerDegLat = 111.32;
-  _geoCache.kmPerDegLon = Math.max(8, 111.32 * Math.cos(latRad));
-}
-
-// Compute the physical-pixel blit position for the overscan canvas.
-// The center of the cache canvas corresponds to _geoCache center; blit it so the
-// CURRENT center aligns with the viewport center, offsetting by any pan delta.
-function _geoCacheBlitXY(ratio) {
-  const overscanPx = _geoCache.overscanPx || 0;
-  const center = state.center || state.data?.settings?.center || state.data?.settings?.user;
-  let bx = -overscanPx;
-  let by = -overscanPx;
-  if (_geoCache.scale && _geoCache.centerLat !== null) {
-    bx -= ((center?.lon ?? 0) - _geoCache.centerLon) * _geoCache.kmPerDegLon * _geoCache.scale;
-    by += ((center?.lat ?? 0) - _geoCache.centerLat) * _geoCache.kmPerDegLat * _geoCache.scale;
-  }
-  return { bx: Math.round(bx * ratio), by: Math.round(by * ratio) };
-}
-
-function drawGeoBgCached(drawFn) {
-  if (!_geoCacheValid()) _paintGeoToCache(drawFn);
-  if (!_geoCache.canvas) { drawFn(); return; }
-  const ratio = window.devicePixelRatio || 1;
-  const { bx, by } = _geoCacheBlitXY(ratio);
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.drawImage(_geoCache.canvas, bx, by);
-  ctx.restore();
-}
-
-// 2D interactive pan: blit the pre-built overscan canvas at the current pan offset.
-// Returns false when cache is absent, stale, or pan exceeds the overscan margin.
-function drawGeoPannedCache() {
-  if (state.viewMode !== "2d" || !_geoCache.canvas) return false;
-  if (_geoCache.rangeKm !== state.rangeKm || !_geoCache.scale) return false;
-  const center = state.center || state.data?.settings?.center || state.data?.settings?.user;
-  if (_geoCache.centerLat === null) return false;
-  const dx = Math.abs(((center?.lon ?? 0) - _geoCache.centerLon) * _geoCache.kmPerDegLon * _geoCache.scale);
-  const dy = Math.abs(((center?.lat ?? 0) - _geoCache.centerLat) * _geoCache.kmPerDegLat * _geoCache.scale);
-  const overscanPx = _geoCache.overscanPx || 0;
-  if (dx > overscanPx || dy > overscanPx) return false;   // beyond pre-rendered margin
-  const ratio = window.devicePixelRatio || 1;
-  const { bx, by } = _geoCacheBlitXY(ratio);
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.drawImage(_geoCache.canvas, bx, by);
-  ctx.restore();
-  return true;
-}
-
-function drawGeoStaleCache() {
-  if (state.viewMode !== "2d" || !_geoCache.canvas || !_geoCache.scale || _geoCache.centerLat === null) return false;
-  const ratio = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  if (!rect.width || !rect.height || !_geoCache.rangeKm || !state.rangeKm) return false;
-  const center = state.center || state.data?.settings?.center || state.data?.settings?.user;
-  const deltaX = ((center?.lon ?? 0) - _geoCache.centerLon) * _geoCache.kmPerDegLon * _geoCache.scale;
-  const deltaY = -((center?.lat ?? 0) - _geoCache.centerLat) * _geoCache.kmPerDegLat * _geoCache.scale;
-  const overscanPx = _geoCache.overscanPx || 0;
-  const zoomScale = Math.max(0.35, Math.min(3.2, _geoCache.rangeKm / state.rangeKm));
-  const cacheCenterX = (overscanPx + rect.width / 2 + deltaX) * ratio;
-  const cacheCenterY = (overscanPx + rect.height / 2 + deltaY) * ratio;
-  const screenCenterX = (rect.width / 2) * ratio;
-  const screenCenterY = (rect.height / 2) * ratio;
-  const dx = screenCenterX - cacheCenterX * zoomScale;
-  const dy = screenCenterY - cacheCenterY * zoomScale;
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(
-    _geoCache.canvas,
-    dx,
-    dy,
-    _geoCache.canvas.width * zoomScale,
-    _geoCache.canvas.height * zoomScale,
-  );
-  ctx.restore();
-  return true;
-}
+const ctx = canvas.getContext("2d");
 const MIN_3D_VIEW_ZOOM = 0.6;
 const MAX_3D_VIEW_ZOOM = 6;
 const MIN_3D_RANGE_KM = 2;
@@ -229,7 +71,6 @@ const state = {
   drawingInteractive: false,
   lastInteractiveDraw: 0,
   interactiveDrawTimer: null,
-  mapInteractionUntil: 0,
   fetchInFlight: { light: false, full: false },
   pendingFetch: false,
   pendingFetchDetail: null,
@@ -441,8 +282,8 @@ function updateLiveTimeLabels() {
     state.lastPovClockSecond = wholeSecond;
     requestDraw(false);
   }
-  if (state.data?.aircraft?.length) {
-    requestDraw(isMapInteracting());
+  if (state.data?.aircraft?.length && !state.dragging && !state.touchStartDistance) {
+    requestDraw(false);
   }
   drawActiveView();
 }
@@ -622,13 +463,7 @@ function clamp3dRangeKm(value) {
 }
 
 function isMapInteracting() {
-  return Boolean(
-    state.dragging ||
-    state.viewDragging ||
-    state.touchStartDistance ||
-    state.pinching ||
-    performance.now() < (state.mapInteractionUntil || 0)
-  );
+  return Boolean(state.dragging || state.viewDragging || state.touchStartDistance || state.pinching);
 }
 
 function geodataHasVectors(geo) {
@@ -670,17 +505,7 @@ function lockInteractionGeodata() {
 
 function releaseInteractionGeodata(delay = 260) {
   setTimeout(() => {
-    if (isMapInteracting()) {
-      releaseInteractionGeodata(120);
-      return;
-    }
-    state.interactionGeodata = null;
-    if (state.pendingFetch) {
-      const nextDetail = state.pendingFetchDetail || "full";
-      state.pendingFetch = false;
-      state.pendingFetchDetail = null;
-      fetchState({ detail: nextDetail }).catch(console.error);
-    }
+    if (!isMapInteracting()) state.interactionGeodata = null;
   }, delay);
 }
 
@@ -981,9 +806,8 @@ function project(lat, lon) {
   const kmPerDegLat = 111.32;
   const kmPerDegLon = Math.max(8, 111.32 * Math.cos(latRad));
   const scale = Math.min(rect.width, rect.height) / (state.rangeKm * 2);
-  const overscan = state.viewMode === "2d" ? _cacheOverscanPx : 0;
-  const x = rect.width / 2 + overscan + (lon - center.lon) * kmPerDegLon * scale;
-  const y = rect.height / 2 + overscan - (lat - center.lat) * kmPerDegLat * scale;
+  const x = rect.width / 2 + (lon - center.lon) * kmPerDegLon * scale;
+  const y = rect.height / 2 - (lat - center.lat) * kmPerDegLat * scale;
   const userAltM = userGroundAltitudeM(data);
   const groundAltM = userAltM;
   return transformViewPoint(x, y, (groundAltM - userAltM) / 1000, scale, rect);
@@ -1670,21 +1494,18 @@ function drawGeodataLowDetail() {
   const kmPerDegLat = 111.32;
   const kmPerDegLon = Math.max(8, 111.32 * Math.cos(latRad));
   const scale = Math.min(rect.width, rect.height) / (state.rangeKm * 2);
-  const overscan = _cacheOverscanPx;
-  const effW = rect.width  + 2 * overscan;
-  const effH = rect.height + 2 * overscan;
   const projectFast = state.viewMode === "3d"
     ? (lat, lon) => project(lat, lon)
     : (lat, lon) => ({
-      x: effW / 2 + (lon - center.lon) * kmPerDegLon * scale,
-      y: effH / 2 - (lat - center.lat) * kmPerDegLat * scale,
+      x: rect.width / 2 + (lon - center.lon) * kmPerDegLon * scale,
+      y: rect.height / 2 - (lat - center.lat) * kmPerDegLat * scale,
     });
   const inView = (point, margin = 80) => (
     point &&
     point.x >= -margin &&
-    point.x <= effW + margin &&
+    point.x <= rect.width + margin &&
     point.y >= -margin &&
-    point.y <= effH + margin
+    point.y <= rect.height + margin
   );
   const cache = getLowDetailCache(geo, p);
 
@@ -1988,89 +1809,42 @@ function altitudeTrailColor(altitudeFt, minFt = null, maxFt = null) {
 }
 
 function drawAltitudePath(points, fallbackColor) {
-  if (points.length < 2) return;
   const projected = points.map((pt) => ({ ...pt, screen: projectTrackPoint(pt) })).filter((pt) => pt.screen);
   if (projected.length < 2) return;
-
   const mode = state.data?.settings?.web?.trajectory_display_mode || "altitude";
-
-  // POINTS mode: all dots in one beginPath → one fill() call
-  if (mode === "points") {
-    ctx.fillStyle = "#4ade80";
-    ctx.globalAlpha = 0.9;
-    ctx.beginPath();
-    for (const pt of projected) {
-      ctx.moveTo(pt.screen.x + 0.45, pt.screen.y);
-      ctx.arc(pt.screen.x, pt.screen.y, 0.45, 0, Math.PI * 2);
-    }
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    return;
-  }
-
-  // ALTITUDE gradient mode ---
-
-  // 1. Thin: skip points < 2px from previous on screen (reduces segments ~5-10x when zoomed out)
-  const MIN_PX_SQ = 4;
-  const thinned = [projected[0]];
-  for (let i = 1; i < projected.length - 1; i++) {
-    const prev = thinned[thinned.length - 1];
-    const dx = projected[i].screen.x - prev.screen.x;
-    const dy = projected[i].screen.y - prev.screen.y;
-    if (dx * dx + dy * dy >= MIN_PX_SQ) thinned.push(projected[i]);
-  }
-  thinned.push(projected[projected.length - 1]); // always keep tail
-  if (thinned.length < 2) return;
-
   const trailAltitudeFt = (pt) => {
     const value = pt.altitude;
     return Number.isFinite(Number(value)) ? Number(value) : null;
   };
-  const alts = thinned.map(trailAltitudeFt).filter((a) => a != null);
-  const minAlt = alts.length ? Math.min(...alts) : null;
-  const maxAlt = alts.length ? Math.max(...alts) : null;
-
+  if (mode === "points") {
+    ctx.fillStyle = "#4ade80";
+    ctx.globalAlpha = 0.9;
+    projected.forEach((pt) => {
+      ctx.beginPath();
+      ctx.arc(pt.screen.x, pt.screen.y, 0.45, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+    return;
+  }
+  const altitudes = projected.map(trailAltitudeFt).filter((alt) => alt !== null && alt !== undefined);
+  const minAlt = altitudes.length ? Math.min(...altitudes) : null;
+  const maxAlt = altitudes.length ? Math.max(...altitudes) : null;
   ctx.lineWidth = 1.1;
   ctx.globalAlpha = 0.98;
-
-  // 2. Batch consecutive segments with same 1000ft altitude bucket into one path+gradient
-  //    Cruise aircraft: 1 batch; climb/descent: a few batches
-  const altBucket = (alt) => (alt != null ? Math.round(Number(alt) / 1000) : -999);
-  const rect = canvas.getBoundingClientRect();
-  const margin = 60;
-  const inVp = (s) => s.x >= -margin && s.x <= rect.width + margin &&
-                      s.y >= -margin && s.y <= rect.height + margin;
-
-  const drawBatch = (start, end) => {
-    // Viewport cull: skip batch if all endpoints are outside
-    let visible = false;
-    for (let i = start; i < end && !visible; i++) {
-      if (inVp(thinned[i].screen) || inVp(thinned[i + 1].screen)) visible = true;
-    }
-    if (!visible) return;
-    const a = thinned[start];
-    const b = thinned[end];
-    const c0 = altitudeTrailColor(trailAltitudeFt(a), minAlt, maxAlt) || fallbackColor;
-    const c1 = altitudeTrailColor(trailAltitudeFt(b), minAlt, maxAlt) || fallbackColor;
+  for (let i = 1; i < projected.length; i += 1) {
+    const a = projected[i - 1];
+    const b = projected[i];
+    const startColor = altitudeTrailColor(trailAltitudeFt(a) ?? trailAltitudeFt(b), minAlt, maxAlt) || fallbackColor;
+    const endColor = altitudeTrailColor(trailAltitudeFt(b) ?? trailAltitudeFt(a), minAlt, maxAlt) || fallbackColor;
     const grad = ctx.createLinearGradient(a.screen.x, a.screen.y, b.screen.x, b.screen.y);
-    grad.addColorStop(0, c0);
-    grad.addColorStop(1, c1);
+    grad.addColorStop(0, startColor);
+    grad.addColorStop(1, endColor);
     ctx.strokeStyle = grad;
     ctx.beginPath();
     ctx.moveTo(a.screen.x, a.screen.y);
-    for (let i = start + 1; i <= end; i++) ctx.lineTo(thinned[i].screen.x, thinned[i].screen.y);
+    ctx.lineTo(b.screen.x, b.screen.y);
     ctx.stroke();
-  };
-
-  let batchStart = 0;
-  let batchBucket = altBucket(trailAltitudeFt(thinned[0]));
-  for (let i = 1; i < thinned.length; i++) {
-    const bucket = altBucket(trailAltitudeFt(thinned[i]));
-    if (bucket !== batchBucket || i === thinned.length - 1) {
-      drawBatch(batchStart, i);
-      batchStart = i;
-      batchBucket = bucket;
-    }
   }
   ctx.globalAlpha = 1;
 }
@@ -2886,15 +2660,8 @@ function draw(options = {}) {
     return;
   }
   if (interactive) {
-    if (!drawGeoPannedCache()) {
-      if (state.viewMode === "2d" && !drawGeoStaleCache()) {
-        drawGeodataLowDetail();
-      } else if (state.viewMode === "3d") {
-        const useHQ = state.rangeKm < 185 && geodataHasVectors(activeGeodataForDrawing());
-        (useHQ ? drawGeodata : drawGeodataLowDetail)();
-      }
-    }
-    // else: 2D pan used pixel-shifted cache — geography stays at full quality
+    if (shouldDrawLowDetailGeodata(true)) drawGeodataLowDetail();
+    else drawGeodata();
     drawTransits();
     drawEvents();
     drawEventAircraftLinks();
@@ -2905,15 +2672,8 @@ function draw(options = {}) {
     state.drawingInteractive = false;
     return;
   }
-  // 3D: camera angle baked into projected image; avoid cache to eliminate angle-mismatch flicker.
-  // 2D: use overscan cache (pre-renders 300px beyond edges; pan reuses HQ content without rebuild).
-  if (state.viewMode === "3d") {
-    const useHQ = state.rangeKm < 185 && geodataHasVectors(activeGeodataForDrawing());
-    (useHQ ? drawGeodata : drawGeodataLowDetail)();
-  } else {
-    const useHQ = state.rangeKm < 185 && geodataHasVectors(activeGeodataForDrawing());
-    drawGeoBgCached(useHQ ? drawGeodata : drawGeodataLowDetail);
-  }
+  if (shouldDrawLowDetailGeodata(false)) drawGeodataLowDetail();
+  else drawGeodata();
   drawTransits();
   drawEvents();
   drawEventAircraftLinks();
@@ -3849,18 +3609,14 @@ function bindAltCorrUI() {
 function renderMetarData(el, data) {
   if (data.valid) {
     const age = data.age_sec != null ? `${Math.round(data.age_sec / 60)} min ago` : "";
-    const warning = data.warning ? `<div style="color:#d6a84f">${data.warning}</div>` : "";
     el.innerHTML =
       `<div><strong>${data.airport_icao}</strong> ${data.airport_name || ""} · ${data.airport_dist_km} km · <span style="color:#888">${age}</span></div>` +
       `<div style="font-family:monospace;margin:3px 0">${data.raw || ""}</div>` +
-      `<div>Temp: <strong>${data.temp_c}°C</strong> &nbsp; QNH: <strong>${data.qnh_hpa} hPa</strong></div>` +
-      warning;
+      `<div>Temp: <strong>${data.temp_c}°C</strong> &nbsp; QNH: <strong>${data.qnh_hpa} hPa</strong></div>`;
   } else if (data.error) {
     el.innerHTML = `<span style="color:#e88">⚠ ${data.error}</span>`;
-  } else if (data.mode === "metar") {
-    el.innerHTML = `<span style="color:#aaa">Waiting for first METAR fetch…</span>`;
   } else {
-    el.innerHTML = `<span style="color:#888">Save settings with METAR mode to fetch.</span>`;
+    el.innerHTML = `<span style="color:#888">No METAR yet — save settings first to trigger a fetch.</span>`;
   }
 }
 
@@ -3880,37 +3636,49 @@ async function loadMetarDisplay() {
 async function testMetarConnection() {
   const el = document.getElementById("metarDisplay");
   const btn = document.getElementById("metarTestBtn");
-  if (!el || !btn) return;
-  btn.disabled = true;
-  el.textContent = "Testing…";
+  if (!el) return;
+  if (btn) btn.disabled = true;
 
-  // Step 1: check current state via GET
+  // Capture state before triggering so we can detect when it changes
+  let prevFetchedAt = null;
   try {
-    const res = await fetch("/api/metar", { cache: "no-store" });
-    const data = await res.json();
-    if (data.valid) {
-      // Already have valid METAR — show immediately, trigger background refresh
-      renderMetarData(el, data);
-      btn.disabled = false;
-      fetch("/api/metar", { method: "POST", cache: "no-store" }).catch(() => {});
-      return;
-    }
-  } catch { /* fall through */ }
+    const cur = await fetch("/api/metar", { cache: "no-store" });
+    const curData = await cur.json();
+    prevFetchedAt = curData.fetched_at || null;
+  } catch { /* ignore */ }
 
-  // Step 2: no valid data — trigger fetch and wait with countdown
-  fetch("/api/metar", { method: "POST", cache: "no-store" }).catch(() => {});
-  let secs = 8;
-  el.innerHTML = `<span style="color:#aaa">Fetching METAR… <span id="metarCountdown">${secs}</span>s</span>`;
-  const ticker = setInterval(() => {
-    secs--;
-    const cd = document.getElementById("metarCountdown");
-    if (cd) cd.textContent = Math.max(0, secs);
-    if (secs <= 0) clearInterval(ticker);
-  }, 1000);
-  await new Promise((r) => setTimeout(r, 8000));
-  clearInterval(ticker);
-  await loadMetarDisplay();
-  btn.disabled = false;
+  el.innerHTML = `<span style="color:#aaa">Testing… <span id="metarCountdown">30</span>s</span>`;
+
+  // Trigger immediate fetch via POST (returns instantly)
+  try {
+    await fetch("/api/metar", { method: "POST", cache: "no-store" });
+  } catch { /* ignore */ }
+
+  // Poll GET /api/metar until fetched_at changes (new data arrived)
+  const deadline = Date.now() + 30000;
+  const poll = async () => {
+    const countdown = document.getElementById("metarCountdown");
+    const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    if (countdown) countdown.textContent = remaining;
+
+    try {
+      const res = await fetch("/api/metar", { cache: "no-store" });
+      const data = await res.json();
+      if (data.fetched_at !== prevFetchedAt) {
+        renderMetarData(el, data);
+        if (btn) btn.disabled = false;
+        return;
+      }
+    } catch { /* ignore */ }
+
+    if (Date.now() < deadline) {
+      setTimeout(poll, 1000);
+    } else {
+      el.innerHTML = `<span style="color:#e88">⚠ Timed out — check server logs for details</span>`;
+      if (btn) btn.disabled = false;
+    }
+  };
+  setTimeout(poll, 1000);
 }
 
 function readSettingsForm() {
@@ -3990,7 +3758,6 @@ async function saveSettings() {
     if (savedMode === "metar") setTimeout(() => loadMetarDisplay(), 2000);
   }
   state.lowDetailCache = null;
-  _geoCache.canvas = null;
   state.lastGoodGeodata = null;
   state.lastGoodGeodataRangeClass = null;
   state.interactionGeodata = null;
@@ -4146,7 +3913,7 @@ async function fetchState(options = {}) {
       state.lastGoodGeodataRangeClass = dataRangeClass;
     }
     syncClockFromServer(state.data.server_time);
-    if (detail === "full" && !isMapInteracting()) { state.lowDetailCache = null; _geoCache.canvas = null; }
+    if (detail === "full" && !isMapInteracting()) state.lowDetailCache = null;
     state.web = state.data.settings.web;
     if (!state.center) state.center = state.data.settings.center || state.data.settings.user;
     refreshUi(detail);
@@ -4267,18 +4034,14 @@ function selectNearestAircraft(event) {
 }
 
 document.getElementById("zoomIn").addEventListener("click", () => {
-  markMapInteracting(260);
   state.rangeKm = Math.max(1, state.rangeKm / 1.25);
   enforce3dViewBounds();
-  requestDraw(true);
   fetchState().catch(console.error);
 });
 
 document.getElementById("zoomOut").addEventListener("click", () => {
-  markMapInteracting(260);
   state.rangeKm = Math.min(1000, state.rangeKm * 1.25);
   enforce3dViewBounds();
-  requestDraw(true);
   fetchState().catch(console.error);
 });
 
@@ -4335,7 +4098,6 @@ els.trafficList.addEventListener("click", (event) => {
 canvas.addEventListener("click", selectNearestAircraft);
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
-  markMapInteracting(520);
   setEventPredictionPause(true);
   lockInteractionGeodata();
   if (state.viewMode === "3d") {
@@ -4369,7 +4131,6 @@ canvas.addEventListener("contextmenu", (event) => {
 
 canvas.addEventListener("pointerdown", (event) => {
   if (state.pinching) return;
-  markMapInteracting(900);
   setEventPredictionPause(true);
   lockInteractionGeodata();
   if (state.viewMode === "3d") {
@@ -4409,7 +4170,6 @@ canvas.addEventListener("pointerdown", (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   if (state.pinching) return;
-  if (state.viewDragging || state.dragging) markMapInteracting(260);
   if (state.viewDragging && state.viewDragStart && state.viewMode === "3d") {
     const dx = event.clientX - state.viewDragStart.x;
     const dy = event.clientY - state.viewDragStart.y;
@@ -4498,7 +4258,6 @@ canvas.addEventListener("pointercancel", () => {
 
 canvas.addEventListener("touchstart", (event) => {
   if (event.touches.length === 2) {
-    markMapInteracting(900);
     setEventPredictionPause(true);
     lockInteractionGeodata();
     state.pinching = true;
@@ -4531,7 +4290,6 @@ canvas.addEventListener("touchstart", (event) => {
 canvas.addEventListener("touchmove", (event) => {
   if (event.touches.length !== 2 || !state.touchStartDistance) return;
   event.preventDefault();
-  markMapInteracting(260);
   const rect = canvas.getBoundingClientRect();
   const midX = ((event.touches[0].clientX + event.touches[1].clientX) / 2) - rect.left;
   const midY = ((event.touches[0].clientY + event.touches[1].clientY) / 2) - rect.top;
