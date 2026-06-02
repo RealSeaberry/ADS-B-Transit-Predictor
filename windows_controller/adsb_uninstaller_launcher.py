@@ -19,6 +19,22 @@ def bundled_root() -> Path:
     return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
 
+def apply_windows_app_icon(root: Tk, app_id: str) -> None:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        except Exception:
+            pass
+    icon_path = bundled_root() / "icon.ico"
+    if icon_path.exists():
+        try:
+            root.iconbitmap(default=str(icon_path))
+        except Exception:
+            pass
+
+
 def parse_wsl_distros(output: str) -> list[str]:
     return [line.strip().lstrip("*").strip() for line in output.replace("\x00", "").splitlines() if line.strip()]
 
@@ -190,10 +206,7 @@ class UninstallerApp:
 
 def main() -> int:
     root = Tk()
-    try:
-        root.iconbitmap(str(bundled_root() / "icon.ico"))
-    except Exception:
-        pass
+    apply_windows_app_icon(root, "RealSeaberry.ADSBTransitPredictor.Uninstaller")
     UninstallerApp(root)
     root.mainloop()
     return 0

@@ -40,6 +40,22 @@ def bundled_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def apply_windows_app_icon(root: Tk, app_id: str) -> None:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        except Exception:
+            pass
+    icon_path = bundled_root() / "icon.ico"
+    if icon_path.exists():
+        try:
+            root.iconbitmap(default=str(icon_path))
+        except Exception:
+            pass
+
+
 def parse_wsl_distros(output: str) -> list[str]:
     distros: list[str] = []
     for raw_line in output.replace("\x00", "").splitlines():
@@ -329,7 +345,15 @@ class ControllerApp:
         self.save_config()
 
         def work() -> None:
-            cmd = f"cd {self.wsl_dir_expr()} && chmod +x scripts/*.sh && ./scripts/install_linux.sh"
+            project_dir = self.wsl_dir_expr()
+            cmd = f"cd {project_dir} && chmod +x scripts/*.sh && ADSB_NONINTERACTIVE=1 ADSB_INSTALL_PHASE=system ./scripts/install_linux.sh"
+            args = ["wsl.exe", *self.distro_args(), "-u", "root", "bash", "-lc", cmd]
+            self.log("$ " + " ".join(args))
+            result = run_hidden(args, text=True, capture_output=True, timeout=None)
+            self.report_result(result)
+            if result.returncode != 0:
+                return
+            cmd = f"cd {project_dir} && ADSB_INSTALL_PHASE=user ./scripts/install_linux.sh"
             result = self.wsl(cmd, timeout=None)
             self.report_result(result)
 
@@ -557,10 +581,7 @@ def create_payload_archive(source: Path, archive: Path) -> None:
 def main() -> None:
     root = Tk()
     root.geometry("980x720")
-    try:
-        root.iconbitmap(str(bundled_root() / "icon.ico"))
-    except Exception:
-        pass
+    apply_windows_app_icon(root, "RealSeaberry.ADSBTransitPredictor.Controller")
     ControllerApp(root)
     root.mainloop()
 

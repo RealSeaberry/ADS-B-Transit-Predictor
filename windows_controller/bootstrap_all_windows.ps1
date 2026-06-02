@@ -180,9 +180,10 @@ function Write-WslDistroList($Distros, $Raw) {
     Write-Host "Installed WSL distros:"
     if ($Distros.Count -gt 0) {
         for ($Index = 0; $Index -lt $Distros.Count; $Index++) {
-            $DefaultMark = if ($Distros[$Index].Default) { " default" } else { "" }
+            $SelectedMark = if ($Distro -and ($Distros[$Index].Name -eq $Distro)) { " selected" } else { "" }
+            $DefaultMark = if ($Distros[$Index].Default) { " Windows default" } else { "" }
             $VersionText = if ($Distros[$Index].Version -gt 0) { "WSL$($Distros[$Index].Version)" } else { "WSL?" }
-            Write-Host ("  [{0}] {1}  {2}  {3}{4}" -f ($Index + 1), $Distros[$Index].Name, $VersionText, $Distros[$Index].State, $DefaultMark)
+            Write-Host ("  [{0}] {1}  {2}  {3}{4}{5}" -f ($Index + 1), $Distros[$Index].Name, $VersionText, $Distros[$Index].State, $SelectedMark, $DefaultMark)
         }
     } else {
         Write-Host "  Could not parse WSL distro rows. Raw output:"
@@ -368,12 +369,7 @@ ADSB_SKIP_USBIPD=$SkipUsb
 ADSB_RESTART=1
 "@
     $Encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Config))
-    & wsl.exe @DistroArgs bash -lc "mkdir -p ~/.config/adsb-transit && python3 - <<'PY'
-import base64, pathlib
-path = pathlib.Path.home() / '.config' / 'adsb-transit' / 'adsb-web.env'
-path.write_text(base64.b64decode('$Encoded').decode('utf-8'))
-print(path)
-PY"
+    & wsl.exe @DistroArgs bash -lc "mkdir -p ~/.config/adsb-transit && printf '%s' '$Encoded' | base64 -d > ~/.config/adsb-transit/adsb-web.env && printf '%s\n' ~/.config/adsb-transit/adsb-web.env"
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to write WSL runtime config in $Distro"
     }

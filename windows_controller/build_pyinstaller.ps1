@@ -9,8 +9,8 @@ if (-not (Test-Path ".\wsl_payload.tar.gz")) {
 }
 
 python -m PyInstaller .\adsb_windows_controller.spec --clean --noconfirm
-python -m PyInstaller .\adsb_installer_launcher.py --onefile --windowed --name ADSBTransitInstaller --icon .\icon.ico --add-data "icon.ico;." --clean --noconfirm
-python -m PyInstaller .\adsb_uninstaller_launcher.py --onefile --windowed --name ADSBTransitUninstaller --icon .\icon.ico --add-data "icon.ico;." --clean --noconfirm
+python -m PyInstaller .\adsb_installer_launcher.py --onefile --windowed --name ADSBTransitInstaller --icon .\icon.ico --add-data "icon.ico;." --clean --noconfirm --noupx
+python -m PyInstaller .\adsb_uninstaller_launcher.py --onefile --windowed --name ADSBTransitUninstaller --icon .\icon.ico --add-data "icon.ico;." --clean --noconfirm --noupx
 
 $PackageDir = Join-Path $Root "ADSBTransitController-package"
 Remove-Item $PackageDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -18,6 +18,7 @@ New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 Copy-Item ".\dist\ADSBTransitController\*" $PackageDir -Recurse -Force
 Copy-Item ".\dist\ADSBTransitInstaller.exe" $PackageDir -Force
 Copy-Item ".\dist\ADSBTransitUninstaller.exe" $PackageDir -Force
+Copy-Item ".\wsl_payload.tar.gz" $PackageDir -Force
 Copy-Item ".\icon.ico" $PackageDir -Force
 Copy-Item ".\adsb_windows_controller.py" $PackageDir -Force
 Copy-Item ".\adsb_installer_launcher.py" $PackageDir -Force

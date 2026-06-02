@@ -7,25 +7,56 @@ $ErrorActionPreference = "Stop"
 $SourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Exe = Join-Path $SourceDir "ADSBTransitController.exe"
 $Py = Join-Path $SourceDir "adsb_windows_controller.py"
+$InternalDir = Join-Path $SourceDir "_internal"
+
+function Copy-IfExists($Source, $Destination) {
+    if (Test-Path $Source) {
+        if ((Get-Item $Source).PSIsContainer -and (Test-Path $Destination)) {
+            Remove-Item $Destination -Recurse -Force
+        }
+        Copy-Item $Source $Destination -Recurse -Force
+    }
+}
+
+function Assert-Controller-Runtime($Dir) {
+    $RuntimeDir = Join-Path $Dir "_internal"
+    if (-not (Test-Path (Join-Path $Dir "ADSBTransitController.exe"))) {
+        return
+    }
+    if (-not (Test-Path $RuntimeDir)) {
+        Write-Warning "Controller runtime folder _internal was not found. The controller may not start on clean Windows systems."
+        return
+    }
+    $Required = @("VCRUNTIME140.dll", "ucrtbase.dll", "_tkinter.pyd", "tcl86t.dll", "tk86t.dll")
+    foreach ($Name in $Required) {
+        if (-not (Test-Path (Join-Path $RuntimeDir $Name))) {
+            Write-Warning "Controller runtime dependency is missing: _internal\$Name"
+        }
+    }
+    if (-not (Get-ChildItem -Path $RuntimeDir -Filter "python*.dll" -File -ErrorAction SilentlyContinue)) {
+        Write-Warning "Controller runtime dependency is missing: _internal\python*.dll"
+    }
+}
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 if (Test-Path $Exe) {
     Copy-Item $Exe $InstallDir -Force
-    if (Test-Path (Join-Path $SourceDir "wsl_payload.tar.gz")) {
-        Copy-Item (Join-Path $SourceDir "wsl_payload.tar.gz") $InstallDir -Force
-    }
+    Copy-IfExists $InternalDir (Join-Path $InstallDir "_internal")
+    Copy-IfExists (Join-Path $SourceDir "wsl_payload.tar.gz") $InstallDir
+    Copy-IfExists (Join-Path $SourceDir "icon.ico") $InstallDir
     $Target = Join-Path $InstallDir "ADSBTransitController.exe"
 } elseif (Test-Path $Py) {
     Copy-Item $Py $InstallDir -Force
-    if (Test-Path (Join-Path $SourceDir "wsl_payload.tar.gz")) {
-        Copy-Item (Join-Path $SourceDir "wsl_payload.tar.gz") $InstallDir -Force
-    }
+    Copy-IfExists (Join-Path $SourceDir "wsl_payload.tar.gz") $InstallDir
+    Copy-IfExists (Join-Path $SourceDir "icon.ico") $InstallDir
     $Target = "pythonw.exe"
     $Arguments = "`"$(Join-Path $InstallDir "adsb_windows_controller.py")`""
 } else {
     throw "Controller executable or Python source was not found in $SourceDir"
 }
+
+Assert-Controller-Runtime $InstallDir
 
 if ($CreateDesktopShortcut) {
     $Desktop = [Environment]::GetFolderPath("Desktop")

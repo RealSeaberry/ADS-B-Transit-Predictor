@@ -9,7 +9,8 @@ The release package contains:
 - `ADSBTransitInstaller.exe` - guided installer for copying the controller and installing/updating the WSL server payload.
 - `ADSBTransitController.exe` - Windows UI for starting, stopping, and configuring the WSL server.
 - `ADSBTransitUninstaller.exe` - guided WSL-side cleanup tool.
-- `_internal/wsl_payload.tar.gz` - sanitized Linux/WSL server files and bundled data.
+- `_internal/` - packaged Python, Tk, Visual C++ runtime, and Universal CRT files required by the controller executable.
+- `_internal/wsl_payload.tar.gz` - sanitized Linux/WSL server v1.4.1 files and bundled data.
 - PowerShell scripts for manual install, update, and uninstall workflows.
 
 ## Requirements
@@ -17,6 +18,10 @@ The release package contains:
 Install and initialize WSL before running the installer. Ubuntu 22.04 or newer is recommended; Ubuntu 24.04 is supported. WSL2 is recommended for USB forwarding and networking.
 
 For RTL-SDR receivers connected to Windows, install `usbipd-win` or let the installer install it when requested. Tailscale is optional and only needed if you want to access the Web UI from another device over a private tailnet.
+
+The bundled WSL installer installs the full Linux dependency set used by the web server, including Python venv support, pip, tkinter, Python headers, build tools, RTL-SDR tools, and decoder packages where available. If packaged decoder installation is unavailable for the selected distro, use an existing SBS/BaseStation decoder or configure a custom decoder command in the controller.
+
+Do not move `ADSBTransitController.exe` by itself. It depends on the adjacent `_internal` runtime folder. The installer copies this runtime folder into the Windows install directory automatically; moving only the EXE can produce missing C++ runtime, Python DLL, or Tk startup errors on clean Windows systems.
 
 ## Install
 
@@ -69,6 +74,8 @@ Use **Show URLs** to print local, LAN, and Tailscale URLs when available.
 ## Update
 
 For a same-version test update, extract the newer package and run `ADSBTransitInstaller.exe` again against the same distro and WSL project directory. It will replace the WSL project files and controller executable while preserving runtime config where appropriate.
+
+If a previous install opens with a runtime/DLL error, run the newer `ADSBTransitInstaller.exe` again. It replaces the controller executable and refreshes the complete `_internal` runtime dependency folder.
 
 ## Uninstall
 

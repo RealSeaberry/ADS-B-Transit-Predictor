@@ -19,6 +19,22 @@ def bundled_root() -> Path:
     return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
 
+def apply_windows_app_icon(root: Tk, app_id: str) -> None:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        except Exception:
+            pass
+    icon_path = bundled_root() / "icon.ico"
+    if icon_path.exists():
+        try:
+            root.iconbitmap(default=str(icon_path))
+        except Exception:
+            pass
+
+
 def parse_wsl_distros(output: str) -> list[str]:
     distros: list[str] = []
     for line in output.replace("\x00", "").splitlines():
@@ -28,11 +44,43 @@ def parse_wsl_distros(output: str) -> list[str]:
     return distros
 
 
-def list_wsl_distros() -> list[str]:
+def parse_wsl_distro_rows(output: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for raw_line in output.replace("\x00", "").splitlines():
+        line = raw_line.strip()
+        if not line or line.upper().startswith("NAME"):
+            continue
+        is_default = line.startswith("*")
+        clean = line.lstrip("*").strip()
+        parts = clean.split()
+        if len(parts) >= 3 and parts[-1].isdigit():
+            rows.append({
+                "name": " ".join(parts[:-2]),
+                "state": parts[-2],
+                "version": parts[-1],
+                "default": is_default,
+            })
+    return rows
+
+
+def list_wsl_distros() -> list[dict[str, object]]:
+    try:
+        result = subprocess.run(["wsl.exe", "-l", "-v"], text=True, capture_output=True, timeout=10)
+        if result.returncode == 0:
+            rows = parse_wsl_distro_rows(result.stdout)
+            if rows:
+                return rows
+    except Exception:
+        pass
     result = subprocess.run(["wsl.exe", "-l", "-q"], text=True, capture_output=True, timeout=10)
     if result.returncode != 0:
         return []
-    return parse_wsl_distros(result.stdout)
+    return [{"name": name, "state": "Unknown", "version": "?", "default": index == 0} for index, name in enumerate(parse_wsl_distros(result.stdout))]
+
+
+def distro_label(row: dict[str, object]) -> str:
+    suffix = ", Windows default" if row.get("default") else ""
+    return f"{row['name']}  (WSL{row['version']}, {row['state']}{suffix})"
 
 
 def load_last_install() -> dict[str, str]:
@@ -55,9 +103,16 @@ class InstallerApp:
         self.msgs: queue.Queue[str] = queue.Queue()
         self.proc: subprocess.Popen[str] | None = None
         self.distros = list_wsl_distros()
+        self.distro_labels = [distro_label(row) for row in self.distros]
         last = load_last_install()
-        initial_distro = last.get("distro") if last.get("distro") in self.distros else (self.distros[0] if self.distros else "")
-        self.distro = StringVar(value=initial_distro)
+        initial_label = ""
+        for row, label in zip(self.distros, self.distro_labels):
+            if row["name"] == last.get("distro"):
+                initial_label = label
+                break
+        if not initial_label and self.distro_labels:
+            initial_label = self.distro_labels[0]
+        self.distro = StringVar(value=initial_label)
         self.project_dir = StringVar(value=last.get("wsl_project_dir") or "~/ADS-B-Transit-Predictor")
         self.allow_lan = BooleanVar(value=False)
         self.install_usbipd = BooleanVar(value=False)
@@ -76,14 +131,14 @@ class InstallerApp:
 
         ttk.Label(frame, text="WSL distro").grid(row=1, column=0, sticky="w", pady=(14, 4))
         state = "readonly" if len(self.distros) > 1 else "disabled"
-        self.distro_combo = ttk.Combobox(frame, textvariable=self.distro, values=self.distros, state=state)
+        self.distro_combo = ttk.Combobox(frame, textvariable=self.distro, values=self.distro_labels, state=state)
         self.distro_combo.grid(row=1, column=1, sticky="ew", pady=(14, 4))
         ttk.Button(frame, text="Refresh", command=self.refresh_distros).grid(row=1, column=2, padx=(8, 0), pady=(14, 4))
 
         if len(self.distros) == 1:
-            hint = f"Only one distro found: {self.distros[0]}"
+            hint = f"Only one distro found: {self.distros[0]['name']}"
         elif self.distros:
-            hint = "Choose the target distro for this release install."
+            hint = "Choose the target distro. 'Windows default' is only the WSL default marker, not the installer selection."
         else:
             hint = "No WSL distro found. Install and initialize WSL first."
         self.hint = ttk.Label(frame, text=hint)
@@ -116,13 +171,25 @@ class InstallerApp:
 
     def refresh_distros(self) -> None:
         self.distros = list_wsl_distros()
-        self.distro_combo.configure(values=self.distros, state=("readonly" if len(self.distros) > 1 else "disabled"))
+        self.distro_labels = [distro_label(row) for row in self.distros]
+        self.distro_combo.configure(values=self.distro_labels, state=("readonly" if len(self.distros) > 1 else "disabled"))
         if self.distros:
-            self.distro.set(self.distros[0])
-            self.hint.configure(text=f"Detected: {', '.join(self.distros)}")
+            self.distro.set(self.distro_labels[0])
+            self.hint.configure(text=f"Detected: {', '.join(str(row['name']) for row in self.distros)}")
         else:
             self.distro.set("")
             self.hint.configure(text="No WSL distro found. Install and initialize WSL first.")
+
+    def selected_distro_name(self) -> str:
+        selected_label = self.distro.get().strip()
+        for row, label in zip(self.distros, self.distro_labels):
+            if selected_label == label:
+                return str(row["name"])
+        # Backward-compatible fallback for old config values or manual edits.
+        for row in self.distros:
+            if selected_label == str(row["name"]):
+                return str(row["name"])
+        return selected_label
 
     def append(self, text: str) -> None:
         self.msgs.put(text)
@@ -142,7 +209,7 @@ class InstallerApp:
         if not script.exists():
             messagebox.showerror(APP_TITLE, f"Missing installer script:\n{script}")
             return
-        distro = self.distro.get().strip()
+        distro = self.selected_distro_name()
         if not distro:
             messagebox.showerror(APP_TITLE, "No WSL distro selected.")
             return
@@ -168,6 +235,7 @@ class InstallerApp:
         if self.no_desktop_shortcut.get():
             cmd.append("-NoDesktopShortcut")
 
+        self.append(f"Selected target WSL distro: {distro}{os.linesep}")
         self.append("$ " + " ".join(cmd) + os.linesep)
         threading.Thread(target=self.run_process, args=(cmd,), daemon=True).start()
 
@@ -200,10 +268,7 @@ class InstallerApp:
 
 def main() -> int:
     root = Tk()
-    try:
-        root.iconbitmap(str(bundled_root() / "icon.ico"))
-    except Exception:
-        pass
+    apply_windows_app_icon(root, "RealSeaberry.ADSBTransitPredictor.Installer")
     InstallerApp(root)
     root.mainloop()
     return 0
